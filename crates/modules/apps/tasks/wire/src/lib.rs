@@ -115,22 +115,16 @@ pub enum TaskReply {
 
 // ---- job board wire (first-claim kind) ------------------------------------
 
+// admission limits the node enforces off the wire, never archive deletion.
+
 /// max bytes of a `job_id` (non-empty).
-///
-/// a consensus bound the kernel (saga) and the node read off the wire, which
-/// is why it lives here and not in the module.
 pub const MAX_JOB_ID: usize = 256;
 
-/// Bounds are admission limits, never automatic archive deletion.
-///
-/// a consensus bound the kernel (saga) and the node read off the wire, which
-/// is why it lives here and not in the module.
+/// max acknowledgements kept on one job control, one per claim attempt.
 pub const MAX_CONTROL_ACKNOWLEDGEMENTS: usize = 64;
 
-/// Bounds are admission limits, never automatic archive deletion.
-///
-/// a consensus bound the kernel (saga) and the node read off the wire, which
-/// is why it lives here and not in the module.
+/// max bytes of one worker checkpoint or report payload, and of a `Steer`
+/// control's text (non-empty).
 pub const MAX_WORKER_TEXT_BYTES: usize = 4096;
 
 /// the lifecycle of a job. `Done`, `Failed`, and `Cancelled` are terminal.
