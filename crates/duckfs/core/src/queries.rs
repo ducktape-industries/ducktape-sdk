@@ -12,7 +12,8 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::fs::{Fs, refs_contains_snapshot};
 use crate::objects::{
-    EntryKind, FileObj, Kind, ObjectId, SnapshotObj, TreeEntry, TreeObj, verify_chunk_len,
+    EntryKind, FileObj, Kind, ObjectId, SnapshotObj, TreeEntry, TreeObj, object_id,
+    verify_chunk_len,
 };
 use crate::paths::canonical;
 use crate::store::ObjectStore;
@@ -160,7 +161,9 @@ fn committed_view<'a, S: ObjectStore>(
 }
 
 /// resolve one entry against committed state. the filesystem root (empty
-/// segments) is a directory, not a tree ENTRY, so `stat("/")` is `None`.
+/// segments) is not a tree ENTRY — no parent records it — so it is answered
+/// from the same committed root tree `ls("/")` resolves, via [`root_entry`],
+/// and only a path that resolves to nothing is `None`.
 fn stat<S: ObjectStore>(
     fs: &Fs<S>,
     path: &str,
@@ -168,17 +171,45 @@ fn stat<S: ObjectStore>(
 ) -> Result<FilesReply, String> {
     let (store, root_tree) = committed_view(fs, snapshot)?;
     let segs = canonical(path)?;
-    if segs.is_empty() {
-        return Ok(FilesReply::Stat(None));
-    }
-    let Some(entry) = entry_at(&store, root_tree, &segs)? else {
+    let entry = if segs.is_empty() {
+        root_entry(&store, root_tree)?
+    } else if let Some(entry) = entry_at(&store, root_tree, &segs)? {
+        entry
+    } else {
         return Ok(FilesReply::Stat(None));
     };
+    // empty segs join to "", so this is exactly "/" for the root.
     Ok(FilesReply::Stat(Some(entry_info(
         &store,
         &format!("/{}", segs.join("/")),
         &entry,
     )?)))
+}
+
+/// the tree entry the filesystem root would carry if it had a parent: a
+/// directory whose `size` is its child count — the same field [`TreeEdit`]'s
+/// builder writes for every other directory, and the count `ls("/")` lists.
+///
+/// a filesystem with no commits has no root tree object; its id is then the
+/// canonical empty tree — the very id `fs.rs` stages when a commit empties the
+/// root, so a root before its first file and after its last one address alike.
+///
+/// [`TreeEdit`]: crate::tree::TreeEdit
+fn root_entry(store: &Store, root_tree: Option<ObjectId>) -> Result<TreeEntry, String> {
+    Ok(TreeEntry {
+        kind: EntryKind::Dir,
+        id: root_tree.unwrap_or_else(|| {
+            object_id(
+                Kind::Tree,
+                &TreeObj {
+                    entries: BTreeMap::new(),
+                }
+                .encode(),
+            )
+        }),
+        exec: false,
+        size: dir_entries(store, root_tree)?.len() as u64,
+    })
 }
 
 /// list a directory's entries in name order, paged by a strictly-after cursor.
@@ -984,5 +1015,131 @@ mod subtree_after_tests {
         // the cursor "/a/b" is a segment-prefix of the deeper subtree: every
         // path under "/a/b/c" sorts after "/a/b" itself.
         assert!(subtree_after("/a/b/c", Some("/a/b")));
+    }
+}
+
+#[cfg(test)]
+mod stat_root_tests {
+    use std::collections::BTreeMap;
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    use crate::fs::Fs;
+    use crate::state::Refs;
+    use crate::store::{MemStore, ObjectStore};
+    use crate::wire::{Change, Content, EntryInfo, EntryKindWire, FilesQuery, FilesReply};
+
+    /// drain the pending block, flush its objects, adopt — the pure-core twin of
+    /// the module's `commit_block`.
+    fn commit_block(fs: &mut Fs<MemStore>) {
+        if let Some((refs, _height, objects)) = fs.commit_block() {
+            for (kind, body) in &objects {
+                fs.store_mut().put(*kind, body).unwrap();
+            }
+            fs.adopt_refs(refs);
+        }
+    }
+
+    fn put(path: &str, body: &[u8]) -> Change {
+        Change::Put {
+            path: path.into(),
+            exec: false,
+            meta: BTreeMap::new(),
+            content: Content::Inline {
+                b64: STANDARD.encode(body),
+            },
+        }
+    }
+
+    fn new_fs() -> Fs<MemStore> {
+        Fs::new(MemStore::new(), Refs::default())
+    }
+
+    fn stat_of(fs: &Fs<MemStore>, path: &str) -> Option<EntryInfo> {
+        match fs
+            .query(FilesQuery::Stat {
+                path: path.into(),
+                snapshot: None,
+            })
+            .unwrap()
+        {
+            FilesReply::Stat(entry) => entry,
+            other => panic!("expected a stat reply, got {other:?}"),
+        }
+    }
+
+    fn ls_of(fs: &Fs<MemStore>, path: &str) -> Vec<EntryInfo> {
+        match fs
+            .query(FilesQuery::Ls {
+                path: path.into(),
+                snapshot: None,
+                after: None,
+                limit: 100,
+            })
+            .unwrap()
+        {
+            FilesReply::Ls { entries, .. } => entries,
+            other => panic!("expected an ls reply, got {other:?}"),
+        }
+    }
+
+    fn populated() -> Fs<MemStore> {
+        let mut fs = new_fs();
+        fs.commit(
+            &crate::Authority::System,
+            1,
+            1,
+            None,
+            "seed".into(),
+            vec![put("/shared/f", b"hello"), put("/home/acct:7/n", b"hi")],
+        )
+        .unwrap();
+        commit_block(&mut fs);
+        fs
+    }
+
+    #[test]
+    fn root_stat_agrees_with_root_ls() {
+        let fs = populated();
+        let root = stat_of(&fs, "/").expect("the root every filesystem has");
+        assert_eq!(root.path, "/");
+        assert_eq!(root.kind, EntryKindWire::Dir);
+        assert!(!root.exec);
+        assert!(root.meta.is_empty());
+        // the same child count ls reports, and the same id the snapshot roots at.
+        let listed = ls_of(&fs, "/");
+        assert_eq!(listed.len(), 2, "/shared and /home");
+        assert_eq!(root.size, listed.len() as u64);
+        let FilesReply::History(snapshots) = fs.query(FilesQuery::History { limit: 1 }).unwrap()
+        else {
+            panic!("expected a history reply");
+        };
+        assert_eq!(root.object, snapshots[0].root_tree);
+    }
+
+    #[test]
+    fn root_stat_on_a_fresh_filesystem_is_an_empty_dir() {
+        let fs = new_fs();
+        assert!(ls_of(&fs, "/").is_empty(), "nothing committed yet");
+        let root = stat_of(&fs, "/").expect("the root exists before the first commit");
+        assert_eq!(root.path, "/");
+        assert_eq!(root.kind, EntryKindWire::Dir);
+        assert_eq!(root.size, 0);
+    }
+
+    #[test]
+    fn non_root_stat_is_unchanged() {
+        let fs = populated();
+        let shared = stat_of(&fs, "/shared").expect("a materialized directory");
+        assert_eq!(shared.path, "/shared");
+        assert_eq!(shared.kind, EntryKindWire::Dir);
+        assert_eq!(shared.size, 1, "one child under /shared");
+
+        let file = stat_of(&fs, "/shared/f").expect("a committed file");
+        assert_eq!(file.kind, EntryKindWire::File);
+        assert_eq!(file.size, 5);
+
+        assert!(stat_of(&fs, "/shared/missing").is_none(), "absent is None");
     }
 }
