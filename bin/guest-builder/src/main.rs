@@ -805,8 +805,20 @@ resolver = "2"
 # module's wire types into their own crate costs the component real bytes for
 # no change in behaviour. the module set is shipped, hashed and consensus-
 # pinned, so it is compiled like something shipped rather than something built
-# in a loop. panic and debug settings are deliberately NOT set here: a trap's
-# function name is what makes a guest failure readable in a host log.
+# in a loop.
+#
+# The view guest profile carries two more settings this one deliberately does
+# NOT take (sdk#2), so that reading the two side by side is not an invitation
+# to finish the job:
+#   * `strip = true` deletes the wasm name section, and that section is what
+#     turns a validator's trap log from an address into a function name. A
+#     module guest runs on every validator of every network; the operator
+#     holding that log line is not the person who can rebuild the module
+#     unstripped.
+#   * `panic = "abort"` is not a lever on the same axis as the three above.
+#     opt-level, lto and codegen-units produce a different ENCODING of the same
+#     program, so a rebuild at other values is the same module. `abort`
+#     produces a different program.
 [profile.release]
 opt-level = 3
 lto = "fat"
