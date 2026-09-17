@@ -23,6 +23,14 @@ use ducktape::module::host;
 
 struct Component;
 
+/// this guest's refusal: its own snake_case token for the failure class, then
+/// the sentence it refused with. The world carries the pair as ONE string, in
+/// the framing `sdk::refusal` defines — spelled out here because a fixture
+/// guest links wit-bindgen and nothing else.
+fn refused(reason: &str, sentence: impl AsRef<str>) -> host::Error {
+    host::Error::Rejected(format!("{reason}: {}", sentence.as_ref()))
+}
+
 /// the tagged body a put stores under `id`: `kind ‖ body`.
 fn tagged(kind: u8, body: &[u8]) -> Vec<u8> {
     let mut t = Vec::with_capacity(1 + body.len());
@@ -78,7 +86,7 @@ impl Guest for Component {
     }
 
     fn acknowledge(_ack: host::Ack) -> Result<(), host::Error> {
-        Err(host::Error::Rejected("module has no outbound queue".into()))
+        Err(refused("no_outbound_queue", "module has no outbound queue"))
     }
 
     fn shape() -> host::ModuleShape {
@@ -98,31 +106,32 @@ impl Guest for Component {
             Some((b'p', rest)) => {
                 let (&kind, rest) = rest
                     .split_first()
-                    .ok_or_else(|| host::Error::Rejected("put needs a kind byte".into()))?;
+                    .ok_or_else(|| refused("malformed_op", "put needs a kind byte"))?;
                 if rest.len() < 32 {
-                    return Err(host::Error::Rejected(
-                        "put needs a 32-byte expected id".into(),
-                    ));
+                    return Err(refused("malformed_op", "put needs a 32-byte expected id"));
                 }
                 let (expected, body) = rest.split_at(32);
                 let id = host::object_put(kind, body);
                 if id != expected {
-                    return Err(host::Error::Rejected(
-                        "host id differs from sha256(kind ‖ body)".into(),
+                    return Err(refused(
+                        "object_plane_mismatch",
+                        "host id differs from sha256(kind ‖ body)",
                     ));
                 }
                 let want = tagged(kind, body);
 
                 let stat = host::object_stat(&id);
                 if stat != Some((kind, body.len() as u64)) {
-                    return Err(host::Error::Rejected(
-                        "same-dispatch stat missed the put".into(),
+                    return Err(refused(
+                        "object_plane_mismatch",
+                        "same-dispatch stat missed the put",
                     ));
                 }
                 let got = host::object_get(&id);
                 if got.as_deref() != Some(want.as_slice()) {
-                    return Err(host::Error::Rejected(
-                        "same-dispatch get missed the put".into(),
+                    return Err(refused(
+                        "object_plane_mismatch",
+                        "same-dispatch get missed the put",
                     ));
                 }
                 Ok(())
@@ -132,18 +141,18 @@ impl Guest for Component {
             // rather than reach this Ok.
             Some((b'a', id)) => {
                 if id.len() != 32 {
-                    return Err(host::Error::Rejected(
-                        "absent probe needs a 32-byte id".into(),
-                    ));
+                    return Err(refused("malformed_op", "absent probe needs a 32-byte id"));
                 }
                 if host::object_stat(id).is_some() {
-                    return Err(host::Error::Rejected(
-                        "expected-absent id had a stat".into(),
+                    return Err(refused(
+                        "object_plane_mismatch",
+                        "expected-absent id had a stat",
                     ));
                 }
                 if host::object_get(id).is_some() {
-                    return Err(host::Error::Rejected(
-                        "expected-absent id had a body".into(),
+                    return Err(refused(
+                        "object_plane_mismatch",
+                        "expected-absent id had a body",
                     ));
                 }
                 Ok(())
@@ -153,18 +162,18 @@ impl Guest for Component {
             // are the same op — the mirror of 'a', for the odb-backing proof.
             Some((b'P', id)) => {
                 if id.len() != 32 {
-                    return Err(host::Error::Rejected(
-                        "present probe needs a 32-byte id".into(),
-                    ));
+                    return Err(refused("malformed_op", "present probe needs a 32-byte id"));
                 }
                 if host::object_stat(id).is_none() {
-                    return Err(host::Error::Rejected(
-                        "expected-present id had no stat".into(),
+                    return Err(refused(
+                        "object_plane_mismatch",
+                        "expected-present id had no stat",
                     ));
                 }
                 if host::object_get(id).is_none() {
-                    return Err(host::Error::Rejected(
-                        "expected-present id had no body".into(),
+                    return Err(refused(
+                        "object_plane_mismatch",
+                        "expected-present id had no body",
                     ));
                 }
                 Ok(())
@@ -186,7 +195,7 @@ impl Guest for Component {
                         b.copy_from_slice(rest);
                         u64::from_le_bytes(b)
                     }
-                    _ => return Err(host::Error::Rejected("count must be 8 bytes".into())),
+                    _ => return Err(refused("malformed_op", "count must be 8 bytes")),
                 };
                 for i in 0..n {
                     let _ = host::object_stat(&distinct_id(i));
@@ -201,35 +210,43 @@ impl Guest for Component {
             // — the odb twin of `ducktape_module_sdk::load_config`.
             Some((b'c', want)) => {
                 let config = host::state_get(b"__config")
-                    .ok_or_else(|| host::Error::Rejected("__config absent".into()))?;
+                    .ok_or_else(|| refused("genesis_config", "__config absent"))?;
                 let got = find_config_value(&config, b"chain_id")
-                    .ok_or_else(|| host::Error::Rejected("chain_id absent from __config".into()))?;
+                    .ok_or_else(|| refused("genesis_config", "chain_id absent from __config"))?;
                 if got != want {
-                    return Err(host::Error::Rejected("chain_id value mismatch".into()));
+                    return Err(refused("genesis_config", "chain_id value mismatch"));
                 }
                 Ok(())
             }
-            _ => Err(host::Error::Rejected("unknown op".into())),
+            _ => Err(refused("unknown_op", "unknown op")),
         }
     }
 
     /// Queries project committed refs and committed object bodies.
     fn query(req: Vec<u8>) -> Result<Vec<u8>, host::Error> {
-        let Some((&tag, rest)) = req.split_first() else { return Err(host::Error::Unsupported); };
+        let Some((&tag, rest)) = req.split_first() else {
+            return Err(host::Error::Unsupported);
+        };
         match tag {
             b'r' => {
                 let refs = host::state_get(b"__state").unwrap_or_default();
                 #[cfg(feature = "replacement")]
-                { return Ok([b"updated:".as_slice(), &refs].concat()); }
+                {
+                    return Ok([b"updated:".as_slice(), &refs].concat());
+                }
                 #[cfg(not(feature = "replacement"))]
-                { Ok(refs) }
-            },
+                {
+                    Ok(refs)
+                }
+            }
             b'o' => Ok(host::object_get(rest).unwrap_or_default()),
-            b'g' => host::git_object_read("default", rest, 1024).map(|object| match object.data { Some(host::GitObjectData::Blob(bytes)) => bytes, _ => Vec::new() }),
+            b'g' => host::git_object_read("default", rest, 1024).map(|object| match object.data {
+                Some(host::GitObjectData::Blob(bytes)) => bytes,
+                _ => Vec::new(),
+            }),
             _ => Err(host::Error::Unsupported),
         }
     }
-
 }
 
 export!(Component);

@@ -13,6 +13,14 @@ use ducktape::module::host;
 
 struct Component;
 
+/// this guest's refusal: its own snake_case token for the failure class, then
+/// the sentence it refused with. The world carries the pair as ONE string, in
+/// the framing `sdk::refusal` defines — spelled out here because a fixture
+/// guest links wit-bindgen and nothing else.
+fn refused(reason: &str, sentence: impl AsRef<str>) -> host::Error {
+    host::Error::Rejected(format!("{reason}: {}", sentence.as_ref()))
+}
+
 const COUNT_KEY: &[u8] = b"count";
 /// the replacement step — the one observable difference from `hello-wasm` (which steps 1).
 const STEP: u64 = 100;
@@ -44,7 +52,7 @@ impl Guest for Component {
     }
 
     fn acknowledge(_ack: host::Ack) -> Result<(), host::Error> {
-        Err(host::Error::Rejected("module has no outbound queue".into()))
+        Err(refused("no_outbound_queue", "module has no outbound queue"))
     }
 
     fn shape() -> host::ModuleShape {
@@ -68,10 +76,10 @@ impl Guest for Component {
                 host::state_set(COUNT_KEY, &0u64.to_le_bytes());
                 Ok(())
             }
-            other => Err(host::Error::Rejected(format!(
-                "unknown op ({} bytes)",
-                other.len()
-            ))),
+            other => Err(refused(
+                "unknown_op",
+                format!("unknown op ({} bytes)", other.len()),
+            )),
         }
     }
 

@@ -80,10 +80,13 @@ impl TimeUnit {
         match bytes {
             b"height" => Ok(Self::Height),
             b"millis" => Ok(Self::Millis),
-            other => Err(Error::Module(format!(
-                "genesis config time_unit is {:?}, not \"height\" or \"millis\"",
-                String::from_utf8_lossy(other)
-            ))),
+            other => Err(Error::module(
+                "genesis_config",
+                format!(
+                    "genesis config time_unit is {:?}, not \"height\" or \"millis\"",
+                    String::from_utf8_lossy(other)
+                ),
+            )),
         }
     }
 
@@ -132,8 +135,9 @@ pub fn decode_config(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Error> {
     for _ in 0..count {
         let key = cur.string("genesis-config key")?;
         if prev.as_deref().is_some_and(|p| p >= key.as_str()) {
-            return Err(Error::Module(
-                "genesis-config keys must be strictly increasing".into(),
+            return Err(Error::module(
+                "genesis_config",
+                "genesis-config keys must be strictly increasing",
             ));
         }
         let value = cur.bytes("genesis-config value")?.to_vec();

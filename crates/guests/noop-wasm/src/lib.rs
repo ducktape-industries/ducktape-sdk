@@ -15,6 +15,14 @@ use ducktape::module::host;
 
 struct Component;
 
+/// this guest's refusal: its own snake_case token for the failure class, then
+/// the sentence it refused with. The world carries the pair as ONE string, in
+/// the framing `sdk::refusal` defines — spelled out here because a fixture
+/// guest links wit-bindgen and nothing else.
+fn refused(reason: &str, sentence: impl AsRef<str>) -> host::Error {
+    host::Error::Rejected(format!("{reason}: {}", sentence.as_ref()))
+}
+
 impl Guest for Component {
     fn initialize(_params: Vec<u8>) -> Result<(), host::Error> {
         Ok(())
@@ -32,7 +40,7 @@ impl Guest for Component {
     }
 
     fn acknowledge(_ack: host::Ack) -> Result<(), host::Error> {
-        Err(host::Error::Rejected("module has no outbound queue".into()))
+        Err(refused("no_outbound_queue", "module has no outbound queue"))
     }
 
     fn shape() -> host::ModuleShape {

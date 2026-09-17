@@ -11,6 +11,14 @@ use ducktape::module::host;
 
 struct Component;
 
+/// this guest's refusal: its own snake_case token for the failure class, then
+/// the sentence it refused with. The world carries the pair as ONE string, in
+/// the framing `sdk::refusal` defines — spelled out here because a fixture
+/// guest links wit-bindgen and nothing else.
+fn refused(reason: &str, sentence: impl AsRef<str>) -> host::Error {
+    host::Error::Rejected(format!("{reason}: {}", sentence.as_ref()))
+}
+
 const COUNT_KEY: &[u8] = b"count";
 
 fn read_count() -> u64 {
@@ -40,7 +48,7 @@ impl Guest for Component {
     }
 
     fn acknowledge(_ack: host::Ack) -> Result<(), host::Error> {
-        Err(host::Error::Rejected("module has no outbound queue".into()))
+        Err(refused("no_outbound_queue", "module has no outbound queue"))
     }
 
     fn shape() -> host::ModuleShape {
@@ -79,7 +87,7 @@ impl Guest for Component {
                     }
                     b"output-cap-then-error" => {
                         host::set_output(&vec![0; 256 * 1024 + 1]);
-                        return Err(host::Error::Rejected("explicit refusal".into()));
+                        return Err(refused("explicit_refusal", "explicit refusal"));
                     }
                     b"assigned-cap" => host::set_assigned(&vec![0; 64 * 1024 + 1]),
                     b"declarations-valid" => {
@@ -90,13 +98,13 @@ impl Guest for Component {
                 }
                 Ok(())
             }
-            b"module-error" => Err(host::Error::Rejected("explicit refusal".into())),
+            b"module-error" => Err(refused("explicit_refusal", "explicit refusal")),
             b"self-query" => host::query_module("hello", b"").map(|_| ()),
             b"missing-query" => host::query_module("missing", b"").map(|_| ()),
-            other => Err(host::Error::Rejected(format!(
-                "unknown op ({} bytes)",
-                other.len()
-            ))),
+            other => Err(refused(
+                "unknown_op",
+                format!("unknown op ({} bytes)", other.len()),
+            )),
         }
     }
 

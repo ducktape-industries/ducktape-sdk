@@ -423,7 +423,7 @@ pub trait OdbBacking: HostOdb {
     /// state stays untouched on any error.
     fn install(&mut self, bytes: &[u8], expected: StateRoot) -> Result<(), SdkError> {
         if StateRoot(sha256_array(bytes)) != expected {
-            return Err(SdkError::Module("snapshot root mismatch".into()));
+            return Err(SdkError::module("snapshot_root", "snapshot root mismatch"));
         }
         self.adopt_refs(bytes)
     }
@@ -562,9 +562,10 @@ impl SiblingMemo {
             .saturating_add(bytes);
         let over_budget = next > MAX_HOST_BYTES;
         if over_budget {
-            return Err(SdkError::Module(format!(
-                "read-memo budget exceeded ({MAX_HOST_BYTES} bytes)"
-            )));
+            return Err(SdkError::module(
+                "read_memo_budget",
+                format!("read-memo budget exceeded ({MAX_HOST_BYTES} bytes)"),
+            ));
         }
         Ok(())
     }
@@ -604,11 +605,15 @@ impl SiblingMemo {
     /// the deterministic rejection for a blown replay budget.
     fn budget_error(&self) -> SdkError {
         if self.len() > MAX_SIBLING_READS {
-            SdkError::Module(format!(
-                "sibling-read budget exceeded ({MAX_SIBLING_READS})"
-            ))
+            SdkError::module(
+                "sibling_read_budget",
+                format!("sibling-read budget exceeded ({MAX_SIBLING_READS})"),
+            )
         } else {
-            SdkError::Module(format!("store-read budget exceeded ({MAX_STORE_READS})"))
+            SdkError::module(
+                "store_read_budget",
+                format!("store-read budget exceeded ({MAX_STORE_READS})"),
+            )
         }
     }
 
@@ -806,12 +811,11 @@ impl HostData {
 
 /// a read ceiling as a TRAP: the memo's byte refusals are `SdkError::Module`
 /// because the sibling/store lanes surface them from the driver; an object read
-/// refuses inside the import, so it carries the same text as a trap message.
+/// refuses inside the import, so the whole refusal — token and sentence — goes
+/// in as the trap message, and `module_err` re-reads it back out as the
+/// sentence of a `trap`.
 fn read_refusal(error: SdkError) -> wasmtime::Error {
-    match error {
-        SdkError::Module(message) => wasmtime::Error::msg(message),
-        other => wasmtime::Error::msg(other.to_string()),
-    }
+    wasmtime::Error::msg(error.to_string())
 }
 
 impl host::Host for HostData {
@@ -934,7 +938,10 @@ impl host::Host for HostData {
         let valid =
             valid_git_repository(&repository) && oid.len() == 20 && max_bytes <= 16 * 1024 * 1024;
         if !valid {
-            return Ok(Err(WitError::Rejected("invalid_git_object_read".into())));
+            return Ok(Err(WitError::Rejected(sdk::refusal::encode(
+                "invalid_git_object_read",
+                "repository, oid or max-bytes is outside what a local git read admits",
+            ))));
         }
         let key = (repository, oid, max_bytes);
         if let Some(answer) = self.memo.git_objects.get(&key) {
@@ -1109,7 +1116,9 @@ fn to_wit_error(e: SdkError) -> WitError {
         SdkError::SyncUnsupported => WitError::SyncUnsupported,
         SdkError::SwapUnsupported => WitError::SwapUnsupported,
         SdkError::BudgetExceeded => WitError::BudgetExceeded,
-        SdkError::Module(message) => WitError::Rejected(message),
+        SdkError::Module { reason, sentence } => {
+            WitError::Rejected(sdk::refusal::encode(&reason, &sentence))
+        }
     }
 }
 
@@ -1210,14 +1219,16 @@ impl CompiledModule {
     /// view-only frame has no consensus code to compile: it is refused here,
     /// never seated as an empty module.
     pub fn compile_artifact(bytes: &[u8]) -> Result<Self, SdkError> {
-        let artifact = match Artifact::decode(bytes).map_err(SdkError::Module)? {
-            Artifact::Module(module) => module,
-            Artifact::View(_) => {
-                return Err(SdkError::Module(
-                    "view_artifact_has_no_component: a view-only artifact is not a module".into(),
-                ));
-            }
-        };
+        let artifact =
+            match Artifact::decode(bytes).map_err(|e| SdkError::module("artifact_decode", e))? {
+                Artifact::Module(module) => module,
+                Artifact::View(_) => {
+                    return Err(SdkError::module(
+                        "view_artifact_has_no_component",
+                        "a view-only artifact is not a module",
+                    ));
+                }
+            };
         let mut compiled = Self::compile(&artifact.component)?;
         compiled.code_hash = sha256(bytes);
         compiled.index_guest = artifact.index;
@@ -1430,10 +1441,13 @@ impl WasmModule {
         if runs_over_its_declared_substrate {
             return Ok(());
         }
-        Err(SdkError::Module(format!(
-            "module {id}: the component declares a {:?} backing but the host offered {offered:?} — fail-closed",
-            shape.backing
-        )))
+        Err(SdkError::module(
+            "backing_mismatch",
+            format!(
+                "module {id}: the component declares a {:?} backing but the host offered {offered:?} — fail-closed",
+                shape.backing
+            ),
+        ))
     }
 
     /// the shape these component bytes declare — what the host must know to
@@ -1496,10 +1510,13 @@ impl WasmModule {
             unreachable!("map-backed runs never pause on state reads");
         };
         let digest: &[u8; ROOT_LEN] = key.try_into().map_err(|_| {
-            SdkError::Module(format!(
-                "store-backed state keys must be {ROOT_LEN}-byte digests, got {}",
-                key.len()
-            ))
+            SdkError::module(
+                "state_key_shape",
+                format!(
+                    "store-backed state keys must be {ROOT_LEN}-byte digests, got {}",
+                    key.len()
+                ),
+            )
         })?;
         store.get(digest).await
     }
@@ -1566,15 +1583,15 @@ impl WasmModule {
             StateBacking::Map { committed } => {
                 let decoded = decode_state(bytes)?;
                 if Self::root_of(&decoded) != expected {
-                    return Err(SdkError::Module("snapshot root mismatch".into()));
+                    return Err(SdkError::module("snapshot_root", "snapshot root mismatch"));
                 }
                 *committed = decoded;
                 self.staged.clear();
                 Ok(())
             }
-            StateBacking::Store { .. } => Err(SdkError::Module(
-                "a store-backed wasm module adopts state through its injected store, not install"
-                    .into(),
+            StateBacking::Store { .. } => Err(SdkError::module(
+                "install_unsupported",
+                "a store-backed wasm module adopts state through its injected store, not install",
             )),
             // verify-then-adopt under the backing's own root gate (the default
             // checks `sha256(bytes)` against the refs image; a container-shaped
@@ -1734,8 +1751,9 @@ impl WasmModule {
                     if lifecycle_emitted {
                         self.staged = staged0;
                         self.staged_objects = staged_objects0;
-                        return Err(SdkError::Module(
-                            "module lifecycle cannot emit dispatch outputs".into(),
+                        return Err(SdkError::module(
+                            "lifecycle_output",
+                            "module lifecycle cannot emit dispatch outputs",
                         ));
                     }
                     let declarations = call.declarations(
@@ -1847,7 +1865,10 @@ impl WasmModule {
                     // staged delete is a guest bug — reject deterministically
                     // (identical on every validator) rather than panic.
                     let refs = overlay.ok_or_else(|| {
-                        SdkError::Module("files: refs lane staged a delete, never valid".into())
+                        SdkError::module(
+                            "refs_delete",
+                            "files: refs lane staged a delete, never valid",
+                        )
                     })?;
                     backing.borrow_mut().adopt_refs(&refs)?;
                 }
@@ -1871,10 +1892,13 @@ impl WasmModule {
                     Vec::with_capacity(self.staged.len());
                 for (key, value) in &self.staged {
                     let digest: [u8; ROOT_LEN] = key.as_slice().try_into().map_err(|_| {
-                        SdkError::Module(format!(
-                            "store-backed state keys must be {ROOT_LEN}-byte digests, got {}",
-                            key.len()
-                        ))
+                        SdkError::module(
+                            "state_key_shape",
+                            format!(
+                                "store-backed state keys must be {ROOT_LEN}-byte digests, got {}",
+                                key.len()
+                            ),
+                        )
                     })?;
                     writes.push((digest, value.clone()));
                 }
@@ -2023,7 +2047,7 @@ pub fn initial_state(entries: &[(&[u8], &[u8])]) -> (Vec<u8>, StateRoot) {
 
 fn take_u64(buf: &mut &[u8]) -> Result<u64, SdkError> {
     let Some((head, rest)) = buf.split_first_chunk::<8>() else {
-        return Err(SdkError::Module("snapshot truncated".into()));
+        return Err(SdkError::module("snapshot_decode", "snapshot truncated"));
     };
     *buf = rest;
     Ok(u64::from_le_bytes(*head))
@@ -2032,7 +2056,10 @@ fn take_u64(buf: &mut &[u8]) -> Result<u64, SdkError> {
 fn take_vec(buf: &mut &[u8]) -> Result<Vec<u8>, SdkError> {
     let len = take_u64(buf)?;
     if len > buf.len() as u64 {
-        return Err(SdkError::Module("snapshot length exceeds buffer".into()));
+        return Err(SdkError::module(
+            "snapshot_decode",
+            "snapshot length exceeds buffer",
+        ));
     }
     let (head, rest) = buf.split_at(len as usize);
     *buf = rest;
@@ -2045,8 +2072,9 @@ fn decode_state(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, SdkError> {
     // each entry costs at least two 8-byte length prefixes — a forged count can
     // never over-allocate.
     if count > (buf.len() / 16) as u64 {
-        return Err(SdkError::Module(
-            "snapshot entry count exceeds buffer".into(),
+        return Err(SdkError::module(
+            "snapshot_decode",
+            "snapshot entry count exceeds buffer",
         ));
     }
     let mut committed = BTreeMap::new();
@@ -2055,8 +2083,9 @@ fn decode_state(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, SdkError> {
         let key = take_vec(&mut buf)?;
         // strictly increasing keys: one state has exactly one encoding.
         if prev.as_deref().is_some_and(|p| p >= key.as_slice()) {
-            return Err(SdkError::Module(
-                "snapshot keys must be strictly increasing".into(),
+            return Err(SdkError::module(
+                "snapshot_decode",
+                "snapshot keys must be strictly increasing",
             ));
         }
         let value = take_vec(&mut buf)?;
@@ -2064,7 +2093,10 @@ fn decode_state(bytes: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, SdkError> {
         committed.insert(key, value);
     }
     if !buf.is_empty() {
-        return Err(SdkError::Module("snapshot carries trailing bytes".into()));
+        return Err(SdkError::module(
+            "snapshot_decode",
+            "snapshot carries trailing bytes",
+        ));
     }
     Ok(committed)
 }
@@ -2260,7 +2292,7 @@ fn to_wit_ack(ack: &SdkAck) -> WitAck {
 /// code runs on every validator under the same fuel budget, so it traps at the
 /// same point. Surfaced as [`SdkError::Module`] → the host rolls the op back.
 fn module_err(e: impl std::fmt::Display) -> SdkError {
-    SdkError::Module(format!("{e:#}"))
+    SdkError::module("trap", format!("{e:#}"))
 }
 
 fn wit_err(e: WitError) -> SdkError {
@@ -2271,7 +2303,15 @@ fn wit_err(e: WitError) -> SdkError {
         WitError::SyncUnsupported => SdkError::SyncUnsupported,
         WitError::SwapUnsupported => SdkError::SwapUnsupported,
         WitError::BudgetExceeded => SdkError::BudgetExceeded,
-        WitError::Rejected(message) => SdkError::Module(message),
+        // an unframed refusal is a guest that did not speak the framing, and
+        // it gets no token invented for it here: it takes the same fail-closed
+        // funnel as every other guest answer the host cannot read.
+        WitError::Rejected(framed) => match sdk::refusal::decode(&framed) {
+            Some((reason, sentence)) => SdkError::module(reason, sentence),
+            None => module_err(format!(
+                "module refusal is not framed \"<reason>: <sentence>\": {framed}"
+            )),
+        },
     }
 }
 
@@ -2329,9 +2369,12 @@ impl Mutation<'_> {
             Self::Acknowledge(_) => {
                 let has_followups = messages != 0;
                 if has_followups {
-                    return Err(SdkError::Module(format!(
-                        "{module}: an acknowledgment emitted {messages} follow-up intents; none are allowed"
-                    )));
+                    return Err(SdkError::module(
+                        "ack_followups",
+                        format!(
+                            "{module}: an acknowledgment emitted {messages} follow-up intents; none are allowed"
+                        ),
+                    ));
                 }
                 Ok(Declarations {
                     output: None,
@@ -2460,10 +2503,13 @@ impl Module for WasmModule {
             compiled.shape.config.iter().collect();
         let preserves_config = current_config == replacement_config;
         if !preserves_config {
-            return Err(SdkError::Module(format!(
-                "{} replacement changes initialized configuration keys",
-                self.id
-            )));
+            return Err(SdkError::module(
+                "config_keys_changed",
+                format!(
+                    "{} replacement changes initialized configuration keys",
+                    self.id
+                ),
+            ));
         }
         Ok(Box::new(move || {
             self.engine = compiled.engine;
@@ -2780,7 +2826,7 @@ mod bounds {
     #[tokio::test]
     async fn sibling_error_text_is_subject_to_the_same_memo_byte_ceiling() {
         let ctx = TestCtx::at_height(1).on_query("noisy", |_| {
-            Err(SdkError::Module("x".repeat(MAX_HOST_BYTES)))
+            Err(SdkError::module("noisy", "x".repeat(MAX_HOST_BYTES)))
         });
         let mut memo = SiblingMemo::default();
         let error = memo

@@ -149,9 +149,10 @@ pub fn take_origin(cur: &mut codec::Cursor) -> Result<SagaOrigin, sdk::Error> {
         1 => SagaOrigin::Module(cur.string("origin module")?),
         2 => SagaOrigin::System,
         d => {
-            return Err(sdk::Error::Module(format!(
-                "unknown origin discriminant {d}"
-            )));
+            return Err(sdk::Error::module(
+                "codec",
+                format!("unknown origin discriminant {d}"),
+            ));
         }
     })
 }
@@ -511,4 +512,22 @@ pub fn encode_reply(r: &SagaReply) -> Vec<u8> {
 }
 pub fn decode_reply(b: &[u8]) -> Result<SagaReply, String> {
     sdk::wire::decode(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusal token a malformed origin frame carries. Consumers branch on
+    /// `reason`, so the word is part of the surface, not of the message.
+    #[test]
+    fn an_unknown_origin_discriminant_refuses_with_the_codec_token() {
+        let mut cur = sdk::codec::Cursor::new(&[7]);
+        let err = take_origin(&mut cur).expect_err("7 is not an origin discriminant");
+        let sdk::Error::Module { reason, sentence } = err else {
+            panic!("a decode failure is a module refusal, got {err:?}");
+        };
+        assert_eq!(reason, "codec");
+        assert_eq!(sentence, "unknown origin discriminant 7");
+    }
 }

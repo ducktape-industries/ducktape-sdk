@@ -111,9 +111,10 @@ impl<'a> Cursor<'a> {
         match self.byte(what)? {
             0 => Ok(false),
             1 => Ok(true),
-            other => Err(Error::Module(format!(
-                "{what} flag must be 0 or 1, got {other}"
-            ))),
+            other => Err(Error::module(
+                "codec",
+                format!("{what} flag must be 0 or 1, got {other}"),
+            )),
         }
     }
 
@@ -129,16 +130,22 @@ impl<'a> Cursor<'a> {
     pub fn bytes(&mut self, what: &str) -> Result<&'a [u8], Error> {
         let len = self.u64(what)?;
         if len > self.max_field_len as u64 {
-            return Err(Error::Module(format!(
-                "{what} length {len} exceeds the field cap {}",
-                self.max_field_len
-            )));
+            return Err(Error::module(
+                "codec",
+                format!(
+                    "{what} length {len} exceeds the field cap {}",
+                    self.max_field_len
+                ),
+            ));
         }
         if len > self.buf.len() as u64 {
-            return Err(Error::Module(format!(
-                "{what} length {len} exceeds the {} remaining bytes",
-                self.buf.len()
-            )));
+            return Err(Error::module(
+                "codec",
+                format!(
+                    "{what} length {len} exceeds the {} remaining bytes",
+                    self.buf.len()
+                ),
+            ));
         }
         let (head, rest) = self.buf.split_at(len as usize);
         self.buf = rest;
@@ -150,7 +157,7 @@ impl<'a> Cursor<'a> {
         let raw = self.bytes(what)?;
         std::str::from_utf8(raw)
             .map(str::to_string)
-            .map_err(|e| Error::Module(format!("{what} is not utf-8: {e}")))
+            .map_err(|e| Error::module("codec", format!("{what} is not utf-8: {e}")))
     }
 
     /// an optional utf-8 string: flag byte `0` (absent) or `1` + a non-empty,
@@ -161,20 +168,22 @@ impl<'a> Cursor<'a> {
             1 => {
                 let raw = self.bytes(what)?;
                 if raw.is_empty() {
-                    return Err(Error::Module(format!("{what} flag set but empty")));
+                    return Err(Error::module("codec", format!("{what} flag set but empty")));
                 }
                 if raw.len() > max {
-                    return Err(Error::Module(format!(
-                        "{what} exceeds the {max}-byte limit"
-                    )));
+                    return Err(Error::module(
+                        "codec",
+                        format!("{what} exceeds the {max}-byte limit"),
+                    ));
                 }
                 let s = std::str::from_utf8(raw)
-                    .map_err(|e| Error::Module(format!("{what} is not utf-8: {e}")))?;
+                    .map_err(|e| Error::module("codec", format!("{what} is not utf-8: {e}")))?;
                 Ok(Some(s.to_string()))
             }
-            other => Err(Error::Module(format!(
-                "{what} flag must be 0 or 1, got {other}"
-            ))),
+            other => Err(Error::module(
+                "codec",
+                format!("{what} flag must be 0 or 1, got {other}"),
+            )),
         }
     }
 
@@ -201,10 +210,13 @@ impl<'a> Cursor<'a> {
     /// before looping — `count * min_each` must fit.
     pub fn bound(&self, count: u64, min_each: u64, what: &str) -> Result<(), Error> {
         if count > (self.buf.len() as u64) / min_each.max(1) {
-            return Err(Error::Module(format!(
-                "{what} count {count} exceeds the {} remaining bytes",
-                self.buf.len()
-            )));
+            return Err(Error::module(
+                "codec",
+                format!(
+                    "{what} count {count} exceeds the {} remaining bytes",
+                    self.buf.len()
+                ),
+            ));
         }
         Ok(())
     }
@@ -214,16 +226,16 @@ impl<'a> Cursor<'a> {
         if self.buf.is_empty() {
             Ok(())
         } else {
-            Err(Error::Module(format!(
-                "{what} carries {} trailing bytes",
-                self.buf.len()
-            )))
+            Err(Error::module(
+                "codec",
+                format!("{what} carries {} trailing bytes", self.buf.len()),
+            ))
         }
     }
 }
 
 fn truncated(what: &str) -> Error {
-    Error::Module(format!("{what} truncated"))
+    Error::module("codec", format!("{what} truncated"))
 }
 
 #[cfg(test)]

@@ -12,6 +12,14 @@ use ducktape::module::host;
 
 struct Component;
 
+/// this guest's refusal: its own snake_case token for the failure class, then
+/// the sentence it refused with. The world carries the pair as ONE string, in
+/// the framing `sdk::refusal` defines — spelled out here because a fixture
+/// guest links wit-bindgen and nothing else.
+fn refused(reason: &str, sentence: impl AsRef<str>) -> host::Error {
+    host::Error::Rejected(format!("{reason}: {}", sentence.as_ref()))
+}
+
 const COUNT_KEY: &[u8] = b"count";
 const LAST_KEY: &[u8] = b"last";
 const ROOT_KEY: &[u8] = b"root";
@@ -32,9 +40,9 @@ fn split_target(rest: &[u8]) -> Result<(String, &[u8]), host::Error> {
     let sep = rest
         .iter()
         .position(|&b| b == b':')
-        .ok_or_else(|| host::Error::Rejected("missing ':' separator".into()))?;
+        .ok_or_else(|| refused("malformed_op", "missing ':' separator"))?;
     let target = String::from_utf8(rest[..sep].to_vec())
-        .map_err(|_| host::Error::Rejected("target is not utf-8".into()))?;
+        .map_err(|_| refused("malformed_op", "target is not utf-8"))?;
     Ok((target, &rest[sep + 1..]))
 }
 
@@ -44,7 +52,7 @@ impl Guest for Component {
     }
 
     fn acknowledge(_ack: host::Ack) -> Result<(), host::Error> {
-        Err(host::Error::Rejected("module has no outbound queue".into()))
+        Err(refused("no_outbound_queue", "module has no outbound queue"))
     }
 
     fn initialize(_params: Vec<u8>) -> Result<(), host::Error> {
@@ -77,7 +85,7 @@ impl Guest for Component {
                 let first = host::query_module(&target, req)?;
                 let second = host::query_module(&target, req)?;
                 if first != second {
-                    return Err(host::Error::Rejected("memo answers diverged".into()));
+                    return Err(refused("memo_divergence", "memo answers diverged"));
                 }
                 host::state_set(LAST_KEY, &first);
                 Ok(())
@@ -85,7 +93,7 @@ impl Guest for Component {
             // 'r' target — store the sibling's dispatch-start snapshot root.
             Some((b'r', rest)) => {
                 let target = String::from_utf8(rest.to_vec())
-                    .map_err(|_| host::Error::Rejected("target is not utf-8".into()))?;
+                    .map_err(|_| refused("malformed_op", "target is not utf-8"))?;
                 match host::module_root(&target) {
                     Some(root) => {
                         host::state_set(ROOT_KEY, &root);
@@ -103,14 +111,14 @@ impl Guest for Component {
                         b.copy_from_slice(rest);
                         u64::from_le_bytes(b)
                     }
-                    _ => return Err(host::Error::Rejected("count must be 8 bytes".into())),
+                    _ => return Err(refused("malformed_op", "count must be 8 bytes")),
                 };
                 for i in 0..n {
                     let _ = host::query_module("noisy", &i.to_le_bytes())?;
                 }
                 Ok(())
             }
-            _ => Err(host::Error::Rejected("unknown op".into())),
+            _ => Err(refused("unknown_op", "unknown op")),
         }
     }
 
@@ -123,7 +131,7 @@ impl Guest for Component {
                 let (target, inner) = split_target(rest)?;
                 host::query_module(&target, inner)
             }
-            _ => Err(host::Error::Rejected("unknown query".into())),
+            _ => Err(refused("unknown_query", "unknown query")),
         }
     }
 }

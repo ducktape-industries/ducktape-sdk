@@ -210,7 +210,7 @@ async fn sibling_read_budget_is_a_deterministic_rejection() {
     let err = exec(&mut m, &mut ctx, too_many)
         .await
         .expect_err("over the budget");
-    assert!(matches!(err, Error::Module(m) if m.contains("sibling-read budget")));
+    assert!(matches!(&err, Error::Module { reason, .. } if reason == "sibling_read_budget"));
     m.abort_block().await.expect("abort");
     assert_eq!(m.root(), root_before, "a rejected op stages nothing");
 }

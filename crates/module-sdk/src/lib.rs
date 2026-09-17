@@ -269,7 +269,13 @@ pub fn ack_from_wit(ack: host::Ack) -> Ack {
 /// have natively.
 pub fn error_from_wit(e: host::Error) -> Error {
     match e {
-        host::Error::Rejected(m) => Error::Module(m),
+        // an unframed refusal is a host that did not speak the framing. It
+        // gets no token invented for it: the fault is named as the boundary
+        // fault it is, never as a word some module might have chosen.
+        host::Error::Rejected(framed) => match sdk::refusal::decode(&framed) {
+            Some((reason, sentence)) => Error::module(reason, sentence),
+            None => Error::module("unframed_refusal", framed),
+        },
         host::Error::UnknownModule(id) => Error::UnknownModule(id),
         host::Error::SelfQuery => Error::SelfQuery,
         host::Error::Unsupported => Error::QueryUnsupported,
@@ -277,6 +283,11 @@ pub fn error_from_wit(e: host::Error) -> Error {
         host::Error::SwapUnsupported => Error::SwapUnsupported,
         host::Error::BudgetExceeded => Error::BudgetExceeded,
     }
+}
+
+/// A guest's refusal, framed for the wire: the wit twin of [`sdk::Error::module`].
+pub fn rejected(reason: &str, sentence: impl AsRef<str>) -> host::Error {
+    host::Error::Rejected(sdk::refusal::encode(reason, sentence.as_ref()))
 }
 
 /// Preserve SDK error identity across the component boundary.
@@ -288,7 +299,7 @@ pub fn error_to_wit(error: Error) -> host::Error {
         Error::SyncUnsupported => host::Error::SyncUnsupported,
         Error::SwapUnsupported => host::Error::SwapUnsupported,
         Error::BudgetExceeded => host::Error::BudgetExceeded,
-        Error::Module(message) => host::Error::Rejected(message),
+        Error::Module { reason, sentence } => rejected(&reason, sentence),
     }
 }
 
@@ -404,14 +415,16 @@ impl MerkleStore for WitStore {
     }
 
     async fn sync_target(&self) -> Result<ResolverSyncTarget, Error> {
-        Err(Error::Module(
-            "MerkleStore::sync_target is unreachable in a guest — host-served".into(),
+        Err(Error::module(
+            "host_served",
+            "MerkleStore::sync_target is unreachable in a guest — host-served",
         ))
     }
 
     async fn serve_sync(&self, _req: &[u8]) -> Result<Vec<u8>, Error> {
-        Err(Error::Module(
-            "MerkleStore::serve_sync is unreachable in a guest — host-served".into(),
+        Err(Error::module(
+            "host_served",
+            "MerkleStore::serve_sync is unreachable in a guest — host-served",
         ))
     }
 }
@@ -630,7 +643,10 @@ pub fn load_store_config() -> Option<Vec<u8>> {
 /// silently refuse every certificate / route statement).
 pub fn genesis_chain_id(module_label: &str) -> Result<String, host::Error> {
     let raw = load_config().ok_or_else(|| {
-        host::Error::Rejected(format!("{module_label} genesis config missing (__config)"))
+        rejected(
+            "genesis_config_missing",
+            format!("{module_label} genesis config missing (__config)"),
+        )
     })?;
     decode_chain_id(&raw, module_label)
 }
@@ -643,7 +659,10 @@ pub fn genesis_chain_id(module_label: &str) -> Result<String, host::Error> {
 /// guessed default.
 pub fn store_genesis_chain_id(module_label: &str) -> Result<String, host::Error> {
     let raw = load_store_config().ok_or_else(|| {
-        host::Error::Rejected(format!("{module_label} genesis config missing (__config)"))
+        rejected(
+            "genesis_config_missing",
+            format!("{module_label} genesis config missing (__config)"),
+        )
     })?;
     decode_chain_id(&raw, module_label)
 }
@@ -657,31 +676,50 @@ pub fn store_genesis_time_unit(
     module_label: &str,
 ) -> Result<sdk::genesis_config::TimeUnit, host::Error> {
     let raw = load_store_config().ok_or_else(|| {
-        host::Error::Rejected(format!("{module_label} genesis config missing (__config)"))
+        rejected(
+            "genesis_config_missing",
+            format!("{module_label} genesis config missing (__config)"),
+        )
     })?;
-    let params = sdk::genesis_config::decode_config(&raw)
-        .map_err(|e| host::Error::Rejected(format!("{module_label} genesis config: {e}")))?;
+    let params = sdk::genesis_config::decode_config(&raw).map_err(|e| {
+        rejected(
+            "genesis_config",
+            format!("{module_label} genesis config: {e}"),
+        )
+    })?;
     let value =
         sdk::genesis_config::find(&params, sdk::genesis_config::TIME_UNIT).ok_or_else(|| {
-            host::Error::Rejected(format!(
-                "{module_label} genesis config carries no time_unit"
-            ))
+            rejected(
+                "genesis_config_key_missing",
+                format!("{module_label} genesis config carries no time_unit"),
+            )
         })?;
     sdk::genesis_config::TimeUnit::decode(value)
-        .map_err(|e| host::Error::Rejected(format!("{module_label} {e}")))
+        .map_err(|e| rejected("genesis_config", format!("{module_label} {e}")))
 }
 
 /// decode the `chain_id` parameter out of raw genesis-config bytes — the
 /// shared tail of the two loaders above.
 fn decode_chain_id(raw: &[u8], module_label: &str) -> Result<String, host::Error> {
-    let params = sdk::genesis_config::decode_config(raw)
-        .map_err(|e| host::Error::Rejected(format!("{module_label} genesis config: {e}")))?;
+    let params = sdk::genesis_config::decode_config(raw).map_err(|e| {
+        rejected(
+            "genesis_config",
+            format!("{module_label} genesis config: {e}"),
+        )
+    })?;
     let chain_id =
         sdk::genesis_config::find(&params, sdk::genesis_config::CHAIN_ID).ok_or_else(|| {
-            host::Error::Rejected(format!("{module_label} genesis config carries no chain_id"))
+            rejected(
+                "genesis_config_key_missing",
+                format!("{module_label} genesis config carries no chain_id"),
+            )
         })?;
-    String::from_utf8(chain_id.to_vec())
-        .map_err(|e| host::Error::Rejected(format!("{module_label} chain_id is not utf-8: {e}")))
+    String::from_utf8(chain_id.to_vec()).map_err(|e| {
+        rejected(
+            "genesis_config",
+            format!("{module_label} chain_id is not utf-8: {e}"),
+        )
+    })
 }
 
 // ============================================================================
@@ -728,7 +766,10 @@ macro_rules! snapshot_guest {
                 module
                     .install(&bytes, $crate::sdk::StateRoot(root))
                     .map_err(|e| {
-                        $crate::host::Error::Rejected(::std::format!("{} state reload: {e}", $id))
+                        $crate::rejected(
+                            "state_reload",
+                            ::std::format!("{} state reload: {e}", $id),
+                        )
                     })?;
             }
             ::core::result::Result::Ok(module)

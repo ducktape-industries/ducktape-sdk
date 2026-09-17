@@ -30,6 +30,7 @@
 pub mod codec;
 pub mod genesis_config;
 pub mod hash;
+pub mod refusal;
 pub mod staged_store;
 pub mod wire;
 
@@ -170,9 +171,10 @@ impl Declared {
         match self {
             Declared::Nothing => Ok(None),
             Declared::Value(bytes) => Ok(Some(bytes)),
-            Declared::Oversized { len, cap } => {
-                Err(Error::Module(format!("{what} exceeds cap ({len} > {cap})")))
-            }
+            Declared::Oversized { len, cap } => Err(Error::module(
+                "declaration_cap",
+                format!("{what} exceeds cap ({len} > {cap})"),
+            )),
         }
     }
 }
@@ -265,7 +267,10 @@ impl Origin {
 /// message — the op-validation guard shared by tasks/automations.
 pub fn require_non_empty(field: &str, value: &str) -> Result<(), Error> {
     if value.is_empty() {
-        return Err(Error::Module(format!("{field} must not be empty")));
+        return Err(Error::module(
+            "empty_field",
+            format!("{field} must not be empty"),
+        ));
     }
     Ok(())
 }
@@ -282,18 +287,22 @@ pub const KEY_SEP: char = '\x1f';
 /// model slugs, apply their own admission rule as well.
 pub fn validate_id(field: &str, value: &str, max_bytes: usize) -> Result<(), Error> {
     if value.is_empty() {
-        return Err(Error::Module(format!("{field} must be non-empty")));
+        return Err(Error::module(
+            "empty_field",
+            format!("{field} must be non-empty"),
+        ));
     }
     if value.len() > max_bytes {
-        return Err(Error::Module(format!(
-            "{field} is {} bytes; the cap is {max_bytes}",
-            value.len()
-        )));
+        return Err(Error::module(
+            "field_too_long",
+            format!("{field} is {} bytes; the cap is {max_bytes}", value.len()),
+        ));
     }
     if value.contains(KEY_SEP) {
-        return Err(Error::Module(format!(
-            "{field} must not contain the reserved separator"
-        )));
+        return Err(Error::module(
+            "reserved_separator",
+            format!("{field} must not contain the reserved separator"),
+        ));
     }
     Ok(())
 }
@@ -308,9 +317,10 @@ pub fn validate_id(field: &str, value: &str, max_bytes: usize) -> Result<(), Err
 /// identical to the per-module guards this replaces.
 pub fn verify_snapshot_root(actual: StateRoot, expected: StateRoot) -> Result<(), Error> {
     if actual != expected {
-        return Err(Error::Module(format!(
-            "snapshot root mismatch: recomputed {actual:?}, expected {expected:?}"
-        )));
+        return Err(Error::module(
+            "snapshot_root",
+            format!("snapshot root mismatch: recomputed {actual:?}, expected {expected:?}"),
+        ));
     }
     Ok(())
 }
@@ -537,8 +547,24 @@ pub enum Error {
     /// the local follow-up drain exceeded its dispatch budget (non-termination
     /// guard).
     BudgetExceeded,
-    /// bubbled out of a module's `execute`/`query`.
-    Module(String),
+    /// bubbled out of a module's `execute`/`query`: the module's own
+    /// snake_case token for the failure class it refused on, and the sentence
+    /// it refused with. The token is the module's word VERBATIM — there is no
+    /// default and no validation here, because a token the contract line
+    /// invented would be a word no module chose and every consumer would then
+    /// have to tell apart from one that was.
+    Module { reason: String, sentence: String },
+}
+
+impl Error {
+    /// the module refusal constructor: a snake_case failure-class token and
+    /// the sentence a reader gets.
+    pub fn module(reason: impl Into<String>, sentence: impl Into<String>) -> Self {
+        Error::Module {
+            reason: reason.into(),
+            sentence: sentence.into(),
+        }
+    }
 }
 
 impl core::fmt::Debug for Error {
@@ -550,7 +576,7 @@ impl core::fmt::Debug for Error {
             Error::SyncUnsupported => write!(f, "SyncUnsupported"),
             Error::SwapUnsupported => write!(f, "SwapUnsupported"),
             Error::BudgetExceeded => write!(f, "BudgetExceeded"),
-            Error::Module(m) => write!(f, "Module({m})"),
+            Error::Module { reason, sentence } => write!(f, "Module({reason}: {sentence})"),
         }
     }
 }
@@ -748,10 +774,13 @@ pub trait Module {
     /// whole delivery back. the default rejects — a module without a queue is
     /// never acknowledged.
     async fn acknowledge(&mut self, _ctx: &mut dyn Ctx, ack: &Ack) -> Result<(), Error> {
-        Err(Error::Module(format!(
-            "module has no outbound queue to acknowledge item {} for {}",
-            ack.item, ack.target
-        )))
+        Err(Error::module(
+            "no_outbound_queue",
+            format!(
+                "module has no outbound queue to acknowledge item {} for {}",
+                ack.item, ack.target
+            ),
+        ))
     }
 
     /// Initialize a newly installed module from caller-supplied parameters.

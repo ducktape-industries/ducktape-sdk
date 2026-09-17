@@ -190,7 +190,13 @@ async fn object_read_budget_is_a_deterministic_rejection() {
     let err = exec(&mut m, &mut ctx, budget_op(MAX_OBJECT_READS as u64 + 1))
         .await
         .expect_err("over the object-read budget");
-    assert!(matches!(err, Error::Module(m) if m.contains("object-read budget")));
+    // the object-read ceiling refuses inside the import, so it arrives as a
+    // trap whose sentence carries the budget's own words.
+    assert!(matches!(
+        &err,
+        Error::Module { reason, sentence }
+            if reason == "trap" && sentence.contains("object-read budget")
+    ));
     m.abort_block().await.expect("abort");
     assert_eq!(m.root(), root_before, "a rejected op stages nothing");
 }

@@ -216,15 +216,16 @@ impl MerkleStore for MemStore {
     }
 
     async fn sync_target(&self) -> Result<ResolverSyncTarget, Error> {
-        Err(Error::Module(
-            "MerkleStore::sync_target is unsupported on MemStore — a test double has no resolver lane".into(),
+        Err(Error::module(
+            "test_double",
+            "MerkleStore::sync_target is unsupported on MemStore — a test double has no resolver lane",
         ))
     }
 
     async fn serve_sync(&self, _req: &[u8]) -> Result<Vec<u8>, Error> {
-        Err(Error::Module(
-            "MerkleStore::serve_sync is unsupported on MemStore — a test double has no sync wire"
-                .into(),
+        Err(Error::module(
+            "test_double",
+            "MerkleStore::serve_sync is unsupported on MemStore — a test double has no sync wire",
         ))
     }
 }

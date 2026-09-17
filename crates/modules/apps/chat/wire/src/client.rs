@@ -1919,24 +1919,29 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
     // one would bleed across the index tier's prefix scans ("a" vs
     // "a/b"). unconditional consensus rule, mirroring the ':' gate.
     if channel_id.contains('/') {
-        return Err(Error::Module(
-            "chat: channel ids may not contain '/'".into(),
+        return Err(Error::module(
+            "channel_id_shape",
+            "chat: channel ids may not contain '/'",
         ));
     }
     match party {
         Party::Account(_) | Party::Key(_) => {
             if channel_id.contains(':') {
-                return Err(Error::Module(
-                    "chat: channel ids containing ':' are reserved for modules".into(),
+                return Err(Error::module(
+                    "channel_id_namespace",
+                    "chat: channel ids containing ':' are reserved for modules",
                 ));
             }
             Ok(())
         }
         Party::Module(module) => {
             if !channel_id.starts_with(&format!("{module}:")) {
-                return Err(Error::Module(format!(
-                    "chat: module '{module}' may only create channel ids prefixed '{module}:'"
-                )));
+                return Err(Error::module(
+                    "channel_id_namespace",
+                    format!(
+                        "chat: module '{module}' may only create channel ids prefixed '{module}:'"
+                    ),
+                ));
             }
             Ok(())
         }
