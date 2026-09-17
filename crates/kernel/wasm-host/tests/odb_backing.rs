@@ -137,9 +137,9 @@ impl OdbBacking for Mock {
         _max_bytes: u64,
     ) -> Result<wasm_host::GitObject, Error> {
         Ok(wasm_host::GitObject {
-            kind: 3,
+            kind: git_primitives::KIND_BLOB,
             size: 3,
-            data: Some(wasm_host::GitObjectData::Blob(b"git".to_vec())),
+            raw: b"git".to_vec(),
         })
     }
 

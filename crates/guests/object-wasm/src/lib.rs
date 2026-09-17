@@ -234,7 +234,7 @@ impl Guest for Component {
                 { Ok(refs) }
             },
             b'o' => Ok(host::object_get(rest).unwrap_or_default()),
-            b'g' => host::git_object_read("default", rest, 1024).map(|object| match object.data { Some(host::GitObjectData::Blob(bytes)) => bytes, _ => Vec::new() }),
+            b'g' => host::git_object_read("default", rest, 1024).map(|object| object.raw),
             _ => Err(host::Error::Unsupported),
         }
     }

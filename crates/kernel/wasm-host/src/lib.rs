@@ -328,8 +328,7 @@ impl Default for GuestLimits {
 /// `name_interface` and `type_resource`, never by `type_record`, so a record key
 /// is never matched and the macro then fails the build for an unused key.
 pub use git_primitives::{
-    GitCommit, GitDiff, GitDiffBudget, GitDiffError, GitDiffFile, GitFileStatus, GitObject,
-    GitObjectData, GitTreeEntry,
+    GitDiff, GitDiffBudget, GitDiffError, GitDiffFile, GitFileStatus, GitObject,
 };
 
 /// A local Git object read: confined repository, exact object id, body cap.
@@ -381,6 +380,12 @@ pub trait OdbBacking: HostOdb {
     fn kind(&self) -> Backing {
         Backing::Odb
     }
+    /// One object, RAW: read it, hand back its body in git's own format, and
+    /// refuse the body — `GitObject::raw` empty, `size` still true — when it is
+    /// larger than `max_bytes`. The whole of the substrate's git knowledge is
+    /// those three steps; a commit's fields and a tree's entries are the
+    /// READER's, parsed guest-side (`git_primitives::parse_commit` /
+    /// `parse_tree`), so growing what a reader shows never moves this boundary.
     fn git_object_read(
         &self,
         _repository: &str,
@@ -747,28 +752,10 @@ fn git_diff_index_bytes(files: &[GitDiffFile]) -> usize {
 /// what one git-object answer costs the read memo: the record's fixed fields
 /// plus whatever body the backing materialized.
 fn git_object_bytes(answer: &Result<GitObject, WitError>) -> usize {
-    let object = match answer {
-        Ok(object) => object,
-        Err(WitError::Rejected(message)) => return message.len(),
-        Err(_) => return 0,
-    };
-    9 + match &object.data {
-        None => 0,
-        Some(GitObjectData::Blob(bytes) | GitObjectData::Tag(bytes)) => bytes.len(),
-        Some(GitObjectData::Commit(commit)) => {
-            commit.tree.len()
-                + commit.author.len()
-                + commit.message.len()
-                + commit
-                    .parents
-                    .iter()
-                    .map(|parent| parent.len() + HOST_ENTRY_BYTES)
-                    .sum::<usize>()
-        }
-        Some(GitObjectData::Tree(entries)) => entries
-            .iter()
-            .map(|entry| entry.name.len() + entry.oid.len() + HOST_ENTRY_BYTES)
-            .sum(),
+    match answer {
+        Ok(object) => 9 + object.raw.len(),
+        Err(WitError::Rejected(message)) => message.len(),
+        Err(_) => 0,
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! [`git_primitives`] is what a substrate returns and what a module's read
 //! policy names; [`crate::bindings`] is what the guest lifts. They are the same
-//! six shapes declared twice, because `bindgen!`'s `with:` cannot map a record
+//! shapes declared twice, because `bindgen!`'s `with:` cannot map a record
 //! (see [`crate::GitObject`]), so the correspondence is spelled out here
 //! instead of asserted by the macro. A field added to `wit/module.wit` without
 //! being added to `git-primitives` fails to compile in this file — which is the
@@ -10,35 +10,14 @@
 
 use crate::bindings::ducktape::module::host as wit;
 
+/// an object crosses whole: the host neither parses it nor re-shapes it, so
+/// this is a field rename and nothing else. What a commit or a tree MEANS is
+/// decided guest-side (`git_primitives::parse_commit` / `parse_tree`).
 pub(crate) fn object(object: git_primitives::GitObject) -> wit::GitObject {
     wit::GitObject {
         kind: object.kind,
         size: object.size,
-        data: object.data.map(object_data),
-    }
-}
-
-fn object_data(data: git_primitives::GitObjectData) -> wit::GitObjectData {
-    match data {
-        git_primitives::GitObjectData::Commit(commit) => wit::GitObjectData::Commit(wit::GitCommit {
-            tree: commit.tree,
-            parents: commit.parents,
-            author: commit.author,
-            committed_at: commit.committed_at,
-            message: commit.message,
-        }),
-        git_primitives::GitObjectData::Tree(entries) => wit::GitObjectData::Tree(
-            entries
-                .into_iter()
-                .map(|entry| wit::GitTreeEntry {
-                    kind: entry.kind,
-                    name: entry.name,
-                    oid: entry.oid,
-                })
-                .collect(),
-        ),
-        git_primitives::GitObjectData::Blob(bytes) => wit::GitObjectData::Blob(bytes),
-        git_primitives::GitObjectData::Tag(bytes) => wit::GitObjectData::Tag(bytes),
+        raw: object.raw,
     }
 }
 

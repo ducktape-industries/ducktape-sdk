@@ -9,34 +9,21 @@ interface host {
   /// Read-only local Git objects. Repository names are confined to this
   /// module's substrate; no filesystem paths, fetches or reference mutations.
   /// The host enforces byte ceilings before materializing object bodies.
-  /// a commit as a history walk needs it. `author` is the raw identity line
-  /// ("Name <email>"), `committed-at` the committer's epoch seconds — the
-  /// committer, not the author, because that is the order a branch was built
-  /// in and the order a log is read in. `message` is the WHOLE message; a
-  /// walk that wants only the summary takes the first line, which the host
-  /// cannot do for it without deciding what a summary is.
-  record git-commit {
-    tree: list<u8>,
-    parents: list<list<u8>>,
-    author: string,
-    committed-at: u64,
-    message: string,
-  }
-  record git-tree-entry {
-    kind: u8,
-    name: list<u8>,
-    oid: list<u8>,
-  }
-  variant git-object-data {
-    commit(git-commit),
-    tree(list<git-tree-entry>),
-    blob(list<u8>),
-    tag(list<u8>),
-  }
+  ///
+  /// one object, RAW. `kind` is git's own object type (1 commit, 2 tree,
+  /// 3 blob, 4 tag), `size` the true body length, and `raw` the body in git's
+  /// own format — exactly the bytes `git cat-file <type> <oid>` prints, with
+  /// no header and no compression. `raw` is EMPTY when the read's `max-bytes`
+  /// refused to materialize the body, so the body is whole exactly when
+  /// `raw`'s length equals `size`.
+  ///
+  /// the host does NOT parse it. what a commit or a tree means is the
+  /// reader's business, decided guest-side (`git-primitives`), which is what
+  /// lets a reader grow a field without moving this world.
   record git-object {
     kind: u8,
     size: u64,
-    data: option<git-object-data>,
+    raw: list<u8>,
   }
   /// what happened to one path between the two commits. a closed set: a new
   /// kind must fail the build wherever it is matched rather than fall into a

@@ -1,6 +1,6 @@
 # ducktape-sdk — the standalone fixture guests + the index-guest test map.
 #
-# The five fixture guests under crates/guests/ are plain-cargo wasm32 cdylibs.
+# The fixture guests under crates/guests/ are plain-cargo wasm32 cdylibs.
 # They are NEVER members of the root workspace (see its `exclude`): each is
 # its own `[workspace]`, so it compiles alone and the componentizer wraps it
 # with `guest-builder componentize`, never the normal `guest-builder
@@ -19,8 +19,8 @@ FIXTURE_TARGET_DIR := $(CURDIR)/target/fixture-guests
 TESTMAP_DIR := crates/kernel/index-guest/testmap
 
 # id:crate-dir:cargo-features:core-crate-name:canonical-artifact[,extra-copy...]
-# One shared target dir for all five: wit-bindgen's tree compiles once instead
-# of five times.
+# One shared target dir for all of them: wit-bindgen's tree compiles once
+# instead of once per guest.
 #
 # `cut` rather than `$${x#*:}` on purpose: this is a variable definition, not
 # a recipe, and make reads `#` here as the start of a comment — a parameter
@@ -31,7 +31,8 @@ FIXTURE_GUESTS := \
   hello-replacement:crates/guests/hello-wasm-replacement::hello_wasm_replacement:crates/guests/hello-wasm-replacement/component.wasm \
   noop:crates/guests/noop-wasm::noop_wasm:crates/guests/noop-wasm/component.wasm \
   sibling:crates/guests/sibling-wasm::sibling_wasm:crates/kernel/wasm-host/tests/fixtures/sibling.component.wasm \
-  object:crates/guests/object-wasm::object_wasm:crates/kernel/wasm-host/tests/fixtures/object.component.wasm
+  object:crates/guests/object-wasm::object_wasm:crates/kernel/wasm-host/tests/fixtures/object.component.wasm \
+  object-replacement:crates/guests/object-wasm:replacement:object_wasm:crates/kernel/wasm-host/tests/fixtures/object-replacement.component.wasm
 
 # Parse one FIXTURE_GUESTS record and build it. Sourced by every recipe that
 # walks the list, so the parsing lives in one place.
@@ -54,7 +55,7 @@ FIXTURE_GUEST_SH = \
 
 .PHONY: fixture-guests fixture-guests-check
 
-## builds the five standalone fixture guests and the index-guest test map,
+## builds the standalone fixture guests and the index-guest test map,
 ## writing every committed artifact in place.
 fixture-guests:
 	@$(FIXTURE_GUEST_SH) \
