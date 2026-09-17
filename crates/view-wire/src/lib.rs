@@ -21,9 +21,15 @@
 //! drop silently. A host that reads a frame from an untrusted module runs
 //! [`sanitize`] first.
 
-/// Exact bincode protocol implemented by this build. Bump on serialized shape changes.
+/// Exact bincode protocol implemented by this build. Bump on serialized shape changes,
+/// in the SAME commit as the shape change: a view built against the old shape is
+/// refused at load instead of faulting on its first frame.
 /// This is independent of WIT signatures and the manifest text format.
-pub const WIRE_EPOCH: u32 = 7;
+///
+/// 8: `Event::Response` carries `Result<Vec<u8>, Refusal>` (1b4d8a0 changed the
+///    shape and left the epoch at 7; views deployed before it faulted with
+///    "invalid u8 while decoding bool" on the first refusal frame).
+pub const WIRE_EPOCH: u32 = 8;
 
 pub mod manifest;
 #[cfg(feature = "schema")]
