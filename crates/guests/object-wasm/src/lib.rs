@@ -224,29 +224,21 @@ impl Guest for Component {
 
     /// Queries project committed refs and committed object bodies.
     fn query(req: Vec<u8>) -> Result<Vec<u8>, host::Error> {
-        let Some((&tag, rest)) = req.split_first() else {
-            return Err(host::Error::Unsupported);
-        };
+        let Some((&tag, rest)) = req.split_first() else { return Err(host::Error::Unsupported); };
         match tag {
             b'r' => {
                 let refs = host::state_get(b"__state").unwrap_or_default();
                 #[cfg(feature = "replacement")]
-                {
-                    return Ok([b"updated:".as_slice(), &refs].concat());
-                }
+                { return Ok([b"updated:".as_slice(), &refs].concat()); }
                 #[cfg(not(feature = "replacement"))]
-                {
-                    Ok(refs)
-                }
-            }
+                { Ok(refs) }
+            },
             b'o' => Ok(host::object_get(rest).unwrap_or_default()),
-            b'g' => host::git_object_read("default", rest, 1024).map(|object| match object.data {
-                Some(host::GitObjectData::Blob(bytes)) => bytes,
-                _ => Vec::new(),
-            }),
+            b'g' => host::git_object_read("default", rest, 1024).map(|object| match object.data { Some(host::GitObjectData::Blob(bytes)) => bytes, _ => Vec::new() }),
             _ => Err(host::Error::Unsupported),
         }
     }
+
 }
 
 export!(Component);
