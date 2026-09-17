@@ -127,6 +127,13 @@ pub const MAX_CONTROL_ACKNOWLEDGEMENTS: usize = 64;
 /// control's text (non-empty).
 pub const MAX_WORKER_TEXT_BYTES: usize = 4096;
 
+/// after this many claims, an expired reclaim fails the job instead of
+/// requeuing it.
+pub const MAX_ATTEMPTS: u64 = 8;
+
+/// lower clamp for a claim lease, in views.
+pub const MIN_LEASE_VIEWS: u64 = 10;
+
 /// the lifecycle of a job. `Done`, `Failed`, and `Cancelled` are terminal.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
