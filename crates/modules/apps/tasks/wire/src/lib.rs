@@ -115,6 +115,24 @@ pub enum TaskReply {
 
 // ---- job board wire (first-claim kind) ------------------------------------
 
+/// max bytes of a `job_id` (non-empty).
+///
+/// a consensus bound the kernel (saga) and the node read off the wire, which
+/// is why it lives here and not in the module.
+pub const MAX_JOB_ID: usize = 256;
+
+/// Bounds are admission limits, never automatic archive deletion.
+///
+/// a consensus bound the kernel (saga) and the node read off the wire, which
+/// is why it lives here and not in the module.
+pub const MAX_CONTROL_ACKNOWLEDGEMENTS: usize = 64;
+
+/// Bounds are admission limits, never automatic archive deletion.
+///
+/// a consensus bound the kernel (saga) and the node read off the wire, which
+/// is why it lives here and not in the module.
+pub const MAX_WORKER_TEXT_BYTES: usize = 4096;
+
 /// the lifecycle of a job. `Done`, `Failed`, and `Cancelled` are terminal.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

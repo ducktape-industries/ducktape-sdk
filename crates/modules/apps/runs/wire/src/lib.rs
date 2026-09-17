@@ -50,3 +50,10 @@ pub const FORGE_BODY_BYTE_CAP: usize = 64 * 1024;
 /// `pages_title_limit_is_the_one_pages_enforces` in `tests/`, which dev-deps
 /// `pages` and fails the day the two disagree.
 pub const MAX_PAGE_TITLE_LEN: usize = 512;
+
+/// one renewable agent-attempt lease. Saga's 64-view default is sized for
+/// short workers; the host heartbeats this wider window while the CLI lives.
+///
+/// a consensus bound the kernel (saga) and the node read off the wire, which
+/// is why it lives here and not in the module.
+pub const RUN_LEASE_VIEWS: u64 = 1024;
