@@ -302,9 +302,9 @@ pub enum Change {
     ///
     /// `base_revision` is the [`Record::revision`] the writer was editing.
     /// The reducer takes the write only while the card still stands at it,
-    /// and refuses with what the card says now otherwise — so the writer is
-    /// told what they would have written over, and still holds their own
-    /// draft.
+    /// and otherwise refuses with [`Refused`] `stale_text`, whose sentence is
+    /// the card's current text verbatim — so the writer is handed exactly what
+    /// they would have written over, while still holding their own draft.
     Text {
         id: String,
         text: String,
@@ -397,6 +397,12 @@ pub enum Reply {
 ///
 /// `reason` names a CLASS and not a site: the two places that refuse a group
 /// name share one token, because a caller does the same thing about both.
+///
+/// `sentence` is a sentence for every token but one. `stale_text` carries the
+/// card's current text VERBATIM, because the text IS what the reader of that
+/// refusal needs: the view sets it beside the draft it could not send, in its
+/// own words and its own frame. Prose wrapped around it here would be shown
+/// twice and have to be peeled back off.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refused {
     pub reason: &'static str,
@@ -653,10 +659,7 @@ impl Board {
             ));
         };
         if record.revision != base_revision {
-            return Err(Refused::new(
-                "stale_text",
-                format!("The card now says {:?}.", record.shape.text),
-            ));
+            return Err(Refused::new("stale_text", record.shape.text.clone()));
         }
         let mut shape = record.shape.clone();
         shape.text = text.to_owned();

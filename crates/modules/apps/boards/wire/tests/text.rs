@@ -4,7 +4,7 @@
 //! that was not a coordinate. Words are not like that, so `Change::Text` names
 //! the revision it was written against and the reducer refuses when the card
 //! has moved on under it — with a token to branch on and the card's current
-//! words to show.
+//! text, verbatim, as the sentence.
 
 use boards_wire::{Board, Change, Shape};
 
@@ -49,9 +49,10 @@ fn a_write_against_a_revision_someone_else_has_passed_is_refused_with_their_word
     let refused = write(&board, "mine", base).unwrap_err();
 
     assert_eq!(refused.reason, "stale_text");
-    assert!(
-        refused.to_string().contains("theirs"),
-        "the sentence carries what would have been written over: {refused}"
+    assert_eq!(
+        refused.sentence, "theirs",
+        "the sentence is the card's current text verbatim — no prose around it \
+         for the view to peel off before it can show the words"
     );
     assert_eq!(
         board.shapes["card"].shape.text, "theirs",
