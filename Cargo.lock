@@ -353,6 +353,7 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "chat-message",
+ "duck-address",
  "identity-wire",
  "index-guest",
  "sdk",
@@ -1267,7 +1268,9 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 name = "files-wire"
 version = "0.1.0"
 dependencies = [
+ "duck-address",
  "duckfs-core",
+ "refusal-class",
 ]
 
 [[package]]
@@ -2006,6 +2009,7 @@ dependencies = [
 name = "pages-wire"
 version = "0.1.0"
 dependencies = [
+ "duck-address",
  "index-guest",
  "sdk",
  "serde",
@@ -2432,6 +2436,7 @@ dependencies = [
  "chat-wire",
  "collaboration-wire",
  "dispatch-wire",
+ "duck-address",
  "governance-wire",
  "node-work",
  "pages-wire",

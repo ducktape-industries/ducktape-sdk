@@ -168,9 +168,9 @@ ducktape-module-sdk = { path = "crates/module-sdk" }
 # ---- internal: cross-plane leaf libraries
 design = { path = "crates/design" }
 # the `duck://` address grammar: one parser for `duck://<chain>/<module>/…`,
-# shared by core's git helper and CLI, the app, and the module wire surface
-# that owns a path (forge-wire). No sdk on purpose: its one dep is the
-# zero-dep `refusal-class`.
+# shared by core's git helper and CLI, the app, and the module wire surfaces
+# that own a tail (forge, pages, chat, files, runs). No sdk on purpose: its one
+# dep is the zero-dep `refusal-class`.
 duck-address = { path = "crates/duck-address" }
 # the `.duck` naming library the `gateway` module embeds.
 duckdns = { path = "crates/duckdns" }

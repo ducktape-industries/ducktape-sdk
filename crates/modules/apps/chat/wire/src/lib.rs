@@ -20,6 +20,10 @@ pub mod index;
 // pure data-in/data-out, beside the index fold (same feed, same vocabulary).
 pub mod client;
 
+// chat's half of a `duck://` address.
+mod address;
+pub use address::*;
+
 pub const DEFAULT_CHAT_TARGET: &str = "chat";
 
 /// the attribution object kinds chat reports under (`ObjectRef::kind`): a

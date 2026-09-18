@@ -5,7 +5,7 @@
 //! what the tail MEANS is the module's question, so forge's answer lives here,
 //! beside the wire surface everything else links, and not in the grammar.
 
-use duck_address::{Address, Refused};
+use duck_address::{Address, ChainId, Refused, number};
 use sdk::refusal::INVALID_INPUT;
 
 /// forge's path: `duck://<chain>/forge/<owner>/<repo>`.
@@ -35,15 +35,7 @@ impl TryFrom<&Address> for ForgeRepoAddress {
     type Error = Refused;
 
     fn try_from(address: &Address) -> Result<Self, Refused> {
-        if address.module != "forge" {
-            return Err(Refused::new(
-                INVALID_INPUT,
-                format!(
-                    "A forge address is `duck://<chain>/forge/<owner>/<repo>`, but this one names the module `{}`.",
-                    address.module
-                ),
-            ));
-        }
+        forge(address, "`duck://<chain>/forge/<owner>/<repo>`")?;
         let [owner, repo] = address.path.as_slice() else {
             return Err(Refused::new(
                 INVALID_INPUT,
@@ -53,6 +45,20 @@ impl TryFrom<&Address> for ForgeRepoAddress {
                 ),
             ));
         };
+        ForgeRepoAddress::named(owner, repo)
+    }
+}
+
+impl ForgeRepoAddress {
+    /// the address this repository is at on `chain`.
+    pub fn address(&self, chain: ChainId) -> Result<Address, Refused> {
+        let address = Address::new(chain, "forge", vec![self.owner.clone(), self.repo.clone()])?;
+        ForgeRepoAddress::try_from(&address)?;
+        Ok(address)
+    }
+
+    /// the repository half both typed forge addresses share.
+    fn named(owner: &str, repo: &str) -> Result<Self, Refused> {
         if repo.ends_with(".git") {
             return Err(Refused::new(
                 INVALID_INPUT,
@@ -65,6 +71,130 @@ impl TryFrom<&Address> for ForgeRepoAddress {
             owner: name("owner", owner)?,
             repo: name("repository", repo)?,
         })
+    }
+}
+
+/// something inside a forge repository: `duck://<chain>/forge/<owner>/<repo>/`
+/// then `<n>`, `<n>/comment/<seq>` or `blob/<rev>/<path…>`.
+///
+/// A bare `<owner>/<repo>` is not a locator — it is a [`ForgeRepoAddress`],
+/// the form git and Cargo read — so a caller holding one tries that first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeLocator {
+    pub repo: ForgeRepoAddress,
+    pub target: ForgeTarget,
+}
+
+/// what a [`ForgeLocator`] points at inside its repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForgeTarget {
+    /// an issue or pull request — one number space for both: `<n>`.
+    Item { number: u64 },
+    /// one comment on an item, by its sequence number: `<n>/comment/<seq>`.
+    Comment { number: u64, seq: u64 },
+    /// a file at a revision: `blob/<rev>/<path…>`, the path at least one
+    /// segment. `rev` is a commit id, 40 lowercase hex — the one revision
+    /// [`crate::ForgeQuery::Blob`] reads a file at besides the default head.
+    /// forge-wire rules no ref short name, and a branch's may carry a `/`
+    /// that no segment can, so a ref is not a `rev` here.
+    Blob { rev: String, path: Vec<String> },
+}
+
+impl TryFrom<&Address> for ForgeLocator {
+    type Error = Refused;
+
+    fn try_from(address: &Address) -> Result<Self, Refused> {
+        const FORM: &str = "`duck://<chain>/forge/<owner>/<repo>/` then `<n>`, `<n>/comment/<seq>` or `blob/<rev>/<path…>`";
+        forge(address, FORM)?;
+        let shape = || {
+            Refused::new(
+                INVALID_INPUT,
+                format!(
+                    "A forge locator is {FORM}, and `{address}` is none of them — a bare `<owner>/<repo>` is a repository address, not a locator."
+                ),
+            )
+        };
+        let [owner, repo, rest @ ..] = address.path.as_slice() else {
+            return Err(shape());
+        };
+        let repo = ForgeRepoAddress::named(owner, repo)?;
+        let target = match rest {
+            [item] => ForgeTarget::Item {
+                number: counted("item", item)?,
+            },
+            [item, keyword, seq] if keyword == "comment" => ForgeTarget::Comment {
+                number: counted("item", item)?,
+                seq: counted("comment", seq)?,
+            },
+            [keyword, rev, path @ ..] if keyword == "blob" && !path.is_empty() => {
+                ForgeTarget::Blob {
+                    rev: commit(rev)?,
+                    path: path.to_vec(),
+                }
+            }
+            _ => return Err(shape()),
+        };
+        Ok(ForgeLocator { repo, target })
+    }
+}
+
+impl ForgeLocator {
+    /// the address this locator is at on `chain`.
+    pub fn address(&self, chain: ChainId) -> Result<Address, Refused> {
+        let mut path = vec![self.repo.owner.clone(), self.repo.repo.clone()];
+        match &self.target {
+            ForgeTarget::Item { number } => path.push(number.to_string()),
+            ForgeTarget::Comment { number, seq } => {
+                path.extend([number.to_string(), "comment".to_string(), seq.to_string()])
+            }
+            ForgeTarget::Blob { rev, path: file } => {
+                path.extend(["blob".to_string(), rev.clone()]);
+                path.extend(file.iter().cloned());
+            }
+        }
+        let address = Address::new(chain, "forge", path)?;
+        ForgeLocator::try_from(&address)?;
+        Ok(address)
+    }
+}
+
+fn forge(address: &Address, form: &str) -> Result<(), Refused> {
+    match address.module == "forge" {
+        true => Ok(()),
+        false => Err(Refused::new(
+            INVALID_INPUT,
+            format!(
+                "A forge address is {form}, but this one names the module `{}`.",
+                address.module
+            ),
+        )),
+    }
+}
+
+fn counted(part: &str, value: &str) -> Result<u64, Refused> {
+    number(value).ok_or_else(|| {
+        Refused::new(
+            INVALID_INPUT,
+            format!(
+                "A forge {part} number is decimal with no sign and no leading zero, within 64 bits, and `{value}` is not."
+            ),
+        )
+    })
+}
+
+fn commit(rev: &str) -> Result<String, Refused> {
+    match rev.len() == 40
+        && rev
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        true => Ok(rev.to_string()),
+        false => Err(Refused::new(
+            INVALID_INPUT,
+            format!(
+                "A forge blob revision is a commit id, 40 lowercase hex digits, and `{rev}` is not."
+            ),
+        )),
     }
 }
 
@@ -109,7 +239,7 @@ mod tests {
         sentence(ForgeRepoAddress::try_from(&address(text)))
     }
 
-    fn sentence(parsed: Result<ForgeRepoAddress, Refused>) -> String {
+    fn sentence<T: std::fmt::Debug>(parsed: Result<T, Refused>) -> String {
         let refused = parsed.expect_err("refused");
         assert_eq!(refused.reason, INVALID_INPUT);
         refused.sentence
@@ -187,6 +317,102 @@ mod tests {
             sentence(ForgeRepoAddress::try_from(&built))
                 .starts_with("A forge repository name carries only [a-z0-9._-]")
         );
+    }
+
+    const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// every form prints from its typed parts to the string it parsed from.
+    #[test]
+    fn every_form_round_trips() {
+        let repo = "duck://dognet-b5b6ea90/forge/alice/ducktape-sdk";
+        let parsed = address(repo);
+        let typed = ForgeRepoAddress::try_from(&parsed).expect("a repository");
+        let printed = typed.address(parsed.chain.clone()).expect("prints");
+        assert_eq!(printed, parsed);
+        assert_eq!(printed.to_string(), repo);
+        for text in [
+            format!("{repo}/42"),
+            format!("{repo}/0/comment/7"),
+            format!("{repo}/blob/{REV}/src/lib.rs"),
+            format!("{repo}/blob/{REV}/docs/%EB%B3%B4%EA%B3%A0%EC%84%9C%20Final.md"),
+        ] {
+            let parsed = address(&text);
+            let typed = ForgeLocator::try_from(&parsed).expect("a locator");
+            let printed = typed.address(parsed.chain.clone()).expect("prints");
+            assert_eq!(printed, parsed);
+            assert_eq!(printed.to_string(), text);
+        }
+        assert_eq!(
+            ForgeLocator::try_from(&address(&format!("{repo}/12/comment/3")))
+                .expect("a locator")
+                .target,
+            ForgeTarget::Comment { number: 12, seq: 3 }
+        );
+    }
+
+    #[test]
+    fn every_locator_refusal_names_the_rule_it_broke() {
+        let repo = "duck://dognet-b5b6ea90/forge/alice/ducktape-sdk";
+        for (text, rule) in [
+            (
+                "duck://dognet-b5b6ea90/pages/alice/ducktape-sdk/1".to_string(),
+                "names the module `pages`",
+            ),
+            (repo.to_string(), "is a repository address, not a locator"),
+            (
+                "duck://dognet-b5b6ea90/forge".to_string(),
+                "is none of them",
+            ),
+            (format!("{repo}/1/comment"), "is none of them"),
+            (format!("{repo}/1/2"), "is none of them"),
+            (format!("{repo}/1/comments/2"), "is none of them"),
+            (format!("{repo}/tree/{REV}/src"), "is none of them"),
+            (format!("{repo}/blob/{REV}"), "is none of them"),
+            (format!("{repo}/007"), "item number is decimal"),
+            (format!("{repo}/%2B1"), "item number is decimal"),
+            (format!("{repo}/1/comment/01"), "comment number is decimal"),
+            (
+                format!("{repo}/blob/main/a"),
+                "40 lowercase hex digits, and `main`",
+            ),
+            (
+                format!("{repo}/blob/{}/a", REV.to_uppercase()),
+                "40 lowercase hex",
+            ),
+            (format!("{repo}/blob/{}/a", &REV[1..]), "40 lowercase hex"),
+            (
+                "duck://dognet-b5b6ea90/forge/alice/r.git/1".to_string(),
+                "Drop the `.git`",
+            ),
+        ] {
+            let refused = sentence(ForgeLocator::try_from(&address(&text)));
+            assert!(refused.contains(rule), "{text}: {refused}");
+        }
+    }
+
+    /// a typed value built by hand prints only if it would parse back to itself.
+    #[test]
+    fn a_hand_built_locator_prints_only_if_it_parses_back() {
+        let locator = ForgeLocator {
+            repo: ForgeRepoAddress {
+                owner: "alice".to_string(),
+                repo: "my~crate".to_string(),
+            },
+            target: ForgeTarget::Item { number: 1 },
+        };
+        let chain: ChainId = "dognet-b5b6ea90".parse().expect("a chain id parses");
+        assert!(
+            sentence(locator.address(chain.clone()))
+                .starts_with("A forge repository name carries only [a-z0-9._-]")
+        );
+        let blob = ForgeLocator {
+            target: ForgeTarget::Blob {
+                rev: REV.to_string(),
+                path: vec!["a/b".to_string()],
+            },
+            ..locator
+        };
+        assert!(sentence(blob.address(chain)).contains("no `/` and no NUL"));
     }
 
     #[test]

@@ -3,8 +3,9 @@
 # refuses with; still no sdk.
 # `duck://<label>-<salt>/<module>/<module-path…>`: the authority is the chain
 # id the workspace registry already keys a network by, the first path segment
-# names a module, and the rest belongs to that module: segments that carry any
-# name, percent-encoded in exactly one spelling.
+# names a module (one of the five that claim a name: forge, pages, chat, files,
+# runs), and the rest belongs to that module's wire crate: segments that carry
+# any name, percent-encoded in exactly one spelling.
 #
 # core's `git-remote-duck`, `ducktape forge setup`, workspace-config and the
 # app all read an address through this one parser, so none of them can invent a

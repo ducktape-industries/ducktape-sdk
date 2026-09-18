@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 // over index_guest::StateRead), compiled everywhere and unit-tested natively;
 // the module's `index_guest` shell runs it inside the index database.
 pub mod index;
+// pages' half of a `duck://` address.
+mod address;
+pub use address::*;
 // the module-side error vocabulary and the utf16 text-range/mark algebra the
 // module and its clients (the MCP host, the app editor) agree on.
 pub mod error;

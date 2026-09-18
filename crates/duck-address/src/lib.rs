@@ -7,8 +7,9 @@
 //! ```
 //!
 //! THE AUTHORITY IS THE CHAIN ID. The workspace registry keys a network
-//! `<label>#<salt>` (core's `mint_chain_id` spells it, the salt being 8 hex
-//! digits of the genesis digest), and `#` starts a URL fragment, so an address
+//! `<label>#<salt>` (core's `mint_chain_id` spells it, the salt being hex digits
+//! of the genesis digest: 8 today, and the owner may lengthen them, so any even
+//! count from 8 to 64 reads), and `#` starts a URL fragment, so an address
 //! writes the same pair with `-`. The salt is the match key; the label is
 //! display. Whether a label AGREES with the registry is not a question this
 //! crate can answer — that needs `~/.ducktape/registry.json` and this crate
@@ -16,11 +17,14 @@
 //! salt-only or label-only authority is refused: the address carries the chain
 //! id whole, exactly as the registry keys it.
 //!
-//! THE FIRST PATH SEGMENT NAMES A MODULE and everything after it belongs to
-//! that module. This parser keeps the tail as segments and interprets none of
-//! it: forge's `<owner>/<repo>` rule lives beside forge, in `forge-wire`'s
-//! `ForgeRepoAddress`, so a module's name rule has one home and this grammar
-//! does not grow a branch per module.
+//! THE FIRST PATH SEGMENT NAMES A MODULE — its registered id, one of
+//! [`MODULES`] — and everything after it belongs to that module. This parser
+//! keeps the tail as segments and interprets none of it: each module's tail is
+//! a typed address in that module's wire crate (`forge-wire`'s
+//! `ForgeRepoAddress` and `ForgeLocator`, `pages-wire`'s `PageAddress`,
+//! `chat-wire`'s `MessageAddress`, `files-wire`'s `FileAddress`, `runs-wire`'s
+//! `RunAddress`), so a module's name rule has one home and this grammar does
+//! not grow a branch per module.
 //!
 //! THE TAIL CARRIES ANY NAME, IN EXACTLY ONE SPELLING. A module names files
 //! and ids that are not `[a-z0-9._-]` (`보고서 Final.pdf`, `Blk_7`), so a
@@ -43,20 +47,28 @@ use refusal_class::INVALID_INPUT;
 /// the scheme, spelled once.
 const SCHEME: &str = "duck://";
 
-/// how many hex digits the salt is — `mint_chain_id` takes 4 bytes off the
-/// genesis digest and writes them as 8 lowercase hex.
-const SALT_HEX: usize = 8;
+/// how many hex digits a salt may be — `mint_chain_id` takes 4 bytes off the
+/// genesis digest today and writes them as 8 lowercase hex; the owner may take
+/// more later, up to the whole 32-byte digest, so the length is a range and
+/// not a constant. At least 8, so `my-cafe` is a label and not `my` salted
+/// `cafe`.
+const SALT_HEX: std::ops::RangeInclusive<usize> = 8..=64;
+
+/// the modules that claim a `duck://` name, by registered module id — never an
+/// alias. A name is refused until its module claims it here, so an address for
+/// a module nobody has built cannot be read as one for a module that exists.
+pub const MODULES: [&str; 5] = ["forge", "pages", "chat", "files", "runs"];
 
 /// the network, as the workspace registry keys it: `<label>#<salt>`.
 ///
-/// `salt` is the match key (4 raw bytes, so a comparison cannot be fooled by a
+/// `salt` is the match key (raw bytes, so a comparison cannot be fooled by a
 /// spelling); `label` is what a human reads. Both are public because a
 /// consumer resolving an address against the registry needs both halves — this
 /// is a pair, not an invariant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainId {
     pub label: String,
-    pub salt: [u8; 4],
+    pub salt: Vec<u8>,
 }
 
 impl ChainId {
@@ -66,11 +78,11 @@ impl ChainId {
         format!("{}-{}", self.label, self.salt_hex())
     }
 
-    /// the salt's 8 lowercase hex digits — the spelling the registry, a node's
-    /// status and a push certificate all use. ONE home for it, so nothing
-    /// re-derives the padding.
+    /// the salt's lowercase hex digits, two per byte — the spelling the
+    /// registry, a node's status and a push certificate all use. ONE home for
+    /// it, so nothing re-derives the padding.
     pub fn salt_hex(&self) -> String {
-        format!("{:08x}", u32::from_be_bytes(self.salt))
+        self.salt.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
@@ -85,7 +97,8 @@ impl std::str::FromStr for ChainId {
     type Err = Refused;
 
     /// either spelling: `<label>#<salt>` as the registry writes it, or
-    /// `<label>-<salt>` as an address writes it.
+    /// `<label>-<salt>` as an address writes it. The one rule for a network
+    /// name, wherever one is read.
     ///
     /// Split from the RIGHT in both cases: a label may itself contain `-`, and
     /// `node init --name` validates nothing, so only the LAST separator is the
@@ -104,16 +117,22 @@ impl std::str::FromStr for ChainId {
             && label
                 .bytes()
                 .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'));
-        let salted = salt.len() == SALT_HEX && salt.bytes().all(|byte| byte.is_ascii_hexdigit());
+        let salted = SALT_HEX.contains(&salt.len())
+            && salt.len() % 2 == 0
+            && salt.bytes().all(|byte| byte.is_ascii_hexdigit());
         if !labelled || !salted {
             return Err(incomplete(text));
         }
-        let Ok(salt) = u32::from_str_radix(salt, 16) else {
+        let Ok(salt) = (0..salt.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&salt[at..at + 2], 16))
+            .collect()
+        else {
             return Err(incomplete(text));
         };
         Ok(ChainId {
             label: label.to_string(),
-            salt: salt.to_be_bytes(),
+            salt,
         })
     }
 }
@@ -125,6 +144,11 @@ impl std::str::FromStr for ChainId {
 /// `Address::parse` and [`Display`](std::fmt::Display) round-trip both ways: a
 /// parsed address prints the string it came from, and that string is the only
 /// one that parses to it.
+///
+/// The fields are public so a consumer can read them, and a struct literal
+/// checks nothing: a hand-built segment carrying `/`, or an unclaimed module,
+/// prints a string that does not parse back. [`Address::parse`] and
+/// [`Address::new`] are the only ways to get a value that round-trips.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Address {
     pub chain: ChainId,
@@ -164,23 +188,60 @@ impl Address {
             segments.push(segment);
         }
         let module = segments.remove(0).to_string();
-        lowercase(&module)?;
-        // one module claims a name today. The others (gateway browse, in-app
-        // pages) migrate onto this grammar in their own units — ducktape#2616
-        // §4 — and each adds its name HERE, so an address for a module nobody
-        // has built cannot be read as one for a module that exists.
-        if module != "forge" {
-            return Err(Refused::new(
-                INVALID_INPUT,
-                format!("`{module}` names no ducktape module; the module segment is `forge`."),
-            ));
-        }
+        claimed(&module)?;
         Ok(Address {
             chain,
             module,
             path: segments.into_iter().map(decode).collect::<Result<_, _>>()?,
         })
     }
+
+    /// an address from its parts, checked by the rules [`Address::parse`]
+    /// applies to a chain id, a module segment and a decoded tail segment — the
+    /// constructor a module's typed address prints itself through.
+    pub fn new(chain: ChainId, module: &str, path: Vec<String>) -> Result<Self, Refused> {
+        chain.authority().parse::<ChainId>()?;
+        claimed(module)?;
+        let address = Address {
+            chain,
+            module: module.to_string(),
+            path,
+        };
+        if address.path.iter().any(String::is_empty) {
+            return Err(empty(&address.to_string()));
+        }
+        for segment in &address.path {
+            named(segment, &encode(segment))?;
+        }
+        Ok(address)
+    }
+}
+
+/// a tail segment that spells a number: decimal, no sign, no leading zero (`0`
+/// itself aside), within `u64`. One spelling, so `7`, `07` and `+7` are not
+/// three addresses of one thing; a module that numbers its tail reads it here
+/// and words its own refusal.
+pub fn number(segment: &str) -> Option<u64> {
+    let canonical = !segment.is_empty()
+        && segment.bytes().all(|byte| byte.is_ascii_digit())
+        && (segment == "0" || !segment.starts_with('0'));
+    match canonical {
+        true => segment.parse().ok(),
+        false => None,
+    }
+}
+
+/// the module segment: lowercase, and one of [`MODULES`].
+fn claimed(module: &str) -> Result<(), Refused> {
+    lowercase(module)?;
+    if !MODULES.contains(&module) {
+        let claimed = MODULES.map(|claimed| format!("`{claimed}`")).join(", ");
+        return Err(Refused::new(
+            INVALID_INPUT,
+            format!("`{module}` names no ducktape module; the module segment is one of {claimed}."),
+        ));
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for Address {
@@ -192,16 +253,22 @@ impl std::fmt::Display for Address {
             self.module
         )?;
         for segment in &self.path {
-            formatter.write_str("/")?;
-            for byte in segment.bytes() {
-                match unreserved(byte) {
-                    true => write!(formatter, "{}", byte as char)?,
-                    false => write!(formatter, "%{byte:02X}")?,
-                }
-            }
+            write!(formatter, "/{}", encode(segment))?;
         }
         Ok(())
     }
+}
+
+/// a name's one spelling as a path segment.
+fn encode(name: &str) -> String {
+    let mut spelled = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        match unreserved(byte) {
+            true => spelled.push(byte as char),
+            false => spelled.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    spelled
 }
 
 /// RFC 3986's unreserved bytes: the only ones a path segment writes literally.
@@ -251,13 +318,27 @@ fn decode(segment: &str) -> Result<String, Refused> {
     let Ok(decoded) = String::from_utf8(decoded) else {
         return refuse("decodes to UTF-8 text");
     };
-    if decoded.contains(['/', '\0']) {
+    named(&decoded, segment)?;
+    Ok(decoded)
+}
+
+/// the names no tail segment carries, however it was built: one with `/` or
+/// NUL in it, `.` and `..`. The refusal quotes `spelling`, the segment as an
+/// address writes it.
+fn named(name: &str, spelling: &str) -> Result<(), Refused> {
+    let refuse = |rule: &str| {
+        Err(Refused::new(
+            INVALID_INPUT,
+            format!("A duck:// path segment {rule}, and `{spelling}` does not."),
+        ))
+    };
+    if name.contains(['/', '\0']) {
         return refuse("decodes to a name with no `/` and no NUL in it");
     }
-    if decoded == "." || decoded == ".." {
+    if name == "." || name == ".." {
         return refuse("names something other than `.` or `..`");
     }
-    Ok(decoded)
+    Ok(())
 }
 
 /// why an address was refused: a token to BRANCH on and a sentence to SHOW.
@@ -273,8 +354,8 @@ fn decode(segment: &str) -> Result<String, Refused> {
 /// the rule and quotes what was refused.
 ///
 /// `new` is public: a module validating its own half of a path (forge-wire's
-/// `ForgeRepoAddress`) refuses in the same shape rather than inventing a
-/// second error type for the same grammar.
+/// `ForgeRepoAddress`, pages-wire's `PageAddress`, …) refuses in the same shape
+/// rather than inventing a second error type for the same grammar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refused {
     pub reason: &'static str,
@@ -314,7 +395,9 @@ fn incomplete(text: &str) -> Refused {
     Refused::new(
         INVALID_INPUT,
         format!(
-            "A duck:// authority is the whole chain id `<label>-<salt>` (the registry's `<label>#<salt>`), with `<label>` matching [a-z0-9-] and `<salt>` exactly {SALT_HEX} lowercase hex digits; `{text}` is not one."
+            "A duck:// authority is the whole chain id `<label>-<salt>` (the registry's `<label>#<salt>`), with `<label>` matching [a-z0-9-] and `<salt>` an even count of {} to {} lowercase hex digits; `{text}` is not one.",
+            SALT_HEX.start(),
+            SALT_HEX.end(),
         ),
     )
 }
@@ -534,6 +617,97 @@ mod tests {
     fn the_app_page_origin_is_not_this_grammar() {
         for text in ["duck://app.alice.duck/forge/a", "duck://page/00ff"] {
             assert!(refused(text).contains(AUTHORITY), "{text}");
+        }
+    }
+
+    /// the salt is any even count of 8 to 64 lowercase hex digits, so the owner
+    /// can lengthen it without a new parser; both spellings read and print.
+    #[test]
+    fn a_salt_is_any_even_length_from_8_to_64() {
+        for salt in ["b5b6ea90", &"0123456789abcdef".repeat(4)] {
+            let registry = format!("dognet#{salt}");
+            let chain: ChainId = registry.parse().expect("parses");
+            assert_eq!(chain.salt_hex(), salt);
+            assert_eq!(chain.to_string(), registry);
+            let authority = format!("my-net-{salt}");
+            let chain: ChainId = authority.parse().expect("parses");
+            assert_eq!(chain.authority(), authority);
+            let text = format!("duck://my-net-{salt}/forge/alice/my-crate");
+            assert_eq!(Address::parse(&text).expect("parses").to_string(), text);
+        }
+        for text in [
+            "dognet-b5b6ea",
+            "dognet-b5b6ea90a",
+            &format!("dognet-{}", "ab".repeat(33)),
+        ] {
+            assert!(
+                sentence(text.parse::<ChainId>()).contains(AUTHORITY),
+                "{text}"
+            );
+        }
+        assert!(sentence("dognet-B5B6EA90".parse::<ChainId>()).contains(UPPERCASE));
+    }
+
+    /// five modules claim a name; a sixth is refused by name, and the sentence
+    /// says which five there are.
+    #[test]
+    fn five_modules_claim_their_names() {
+        for module in MODULES {
+            let text = format!("duck://dognet-b5b6ea90/{module}/a");
+            assert_eq!(Address::parse(&text).expect("parses").module, module);
+        }
+        let refused = refused("duck://dognet-b5b6ea90/boards/a");
+        assert!(
+            refused.starts_with("`boards` names no ducktape module")
+                && refused.ends_with("one of `forge`, `pages`, `chat`, `files`, `runs`."),
+            "{refused}"
+        );
+    }
+
+    /// a struct literal checks nothing; `new` checks what `parse` checks, so a
+    /// value from `new` prints a string that parses back to it.
+    #[test]
+    fn new_refuses_what_parse_refuses() {
+        let new = |module: &str, segment: &str| {
+            sentence(Address::new(chain(), module, vec![segment.to_string()]))
+        };
+        for (segment, rule) in [
+            ("a/b", SLASH_OR_NUL),
+            ("a\0b", SLASH_OR_NUL),
+            (".", DOT),
+            ("..", DOT),
+            ("", EMPTY),
+        ] {
+            assert!(new("forge", segment).contains(rule), "{segment:?}");
+        }
+        assert!(new("forge", "a/b").ends_with("and `a%2Fb` does not."));
+        assert!(new("gateway", "a").contains(NO_MODULE));
+        assert!(new("Forge", "a").contains(UPPERCASE));
+        let unsalted = ChainId {
+            label: "dognet".to_string(),
+            salt: vec![0xb5],
+        };
+        assert!(sentence(Address::new(unsalted, "forge", vec![])).contains(AUTHORITY));
+        let built = Address::new(chain(), "files", vec!["보고서 Final.pdf".to_string()])
+            .expect("a legal name");
+        assert_eq!(Address::parse(&built.to_string()), Ok(built));
+    }
+
+    #[test]
+    fn a_number_has_one_spelling() {
+        for (segment, parsed) in [
+            ("0", Some(0)),
+            ("7", Some(7)),
+            ("18446744073709551615", Some(u64::MAX)),
+            ("007", None),
+            ("00", None),
+            ("+1", None),
+            ("-1", None),
+            ("", None),
+            ("1e3", None),
+            ("18446744073709551616", None),
+        ] {
+            assert_eq!(number(segment), parsed, "{segment}");
         }
     }
 

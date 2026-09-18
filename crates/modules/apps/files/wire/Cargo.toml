@@ -4,6 +4,10 @@
 # package distinct from `duckfs-core` — cargo refuses one package under two
 # names — while every type is the same type. No `native` feature, no kernel
 # host, no disk.
+#
+# Beside it, files' half of a `duck://` address (`FileAddress`, not a wire
+# message). Still no sdk: `duck-address` links only the zero-dep
+# `refusal-class`, which this crate names for the refusal token itself.
 [package]
 name = "files-wire"
 edition.workspace = true
@@ -11,3 +15,5 @@ version.workspace = true
 
 [dependencies]
 duckfs-core = { workspace = true }
+duck-address = { workspace = true }
+refusal-class = { workspace = true }

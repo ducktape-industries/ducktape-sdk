@@ -9,6 +9,9 @@ version.workspace = true
 
 [dependencies]
 sdk = { workspace = true }
+# the `duck://` grammar. pages owns what `<page>/block/<block>` means, so
+# `PageAddress` sits here; the grammar around it is one parser for everyone.
+duck-address = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # `index`: the pure fold/view core over the index CONTRACT (op-row envelope +
