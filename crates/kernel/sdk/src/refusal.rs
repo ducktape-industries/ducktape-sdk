@@ -68,6 +68,7 @@ mod tests {
             WRONG_STATE,
             INVALID_INPUT,
             CAPACITY,
+            NOT_YET,
             EXHAUSTED,
             UNAUTHORIZED,
             UNSUPPORTED,

@@ -20,11 +20,12 @@
 //! | constant | token | the caller recovers by |
 //! |---|---|---|
 //! | `NOT_FOUND` | `not_found` | naming a thing that exists (id, key, path, account, sibling module). |
-//! | `ALREADY_EXISTS` | `already_exists` | creating under a different id, or treating the create as done. |
-//! | `STALE` | `stale` | re-reading and retrying: base revision, cursor, request id or turn the caller sent is behind the module's. |
+//! | `ALREADY_EXISTS` | `already_exists` | creating under a different id, or treating the create as done. Includes a request or operation id reused with DIFFERENT work: retrying that id can never succeed. |
+//! | `STALE` | `stale` | re-reading and retrying: base revision, cursor, claim or turn the caller sent is behind the module's. |
 //! | `WRONG_STATE` | `wrong_state` | changing the thing's state first: it exists but is archived, paused, deleted, detached, not drained, sealed. |
 //! | `INVALID_INPUT` | `invalid_input` | fixing the request: malformed, empty, out of range, undecodable, breaks a static rule; retrying unchanged can never succeed. |
 //! | `CAPACITY` | `capacity` | sending less or removing something: a count or size bound of the store, the request or one dispatch's work budget is hit. |
+//! | `NOT_YET` | `not_yet` | waiting: the same request, unchanged, succeeds after a point the sentence names in the module's own clock (a view, a height, a deadline). |
 //! | `EXHAUSTED` | `exhausted` | nothing: a monotonic counter (revision, cursor, sequence, marker) cannot advance again; permanent. |
 //! | `UNAUTHORIZED` | `unauthorized` | acting as someone else: the actor may not do this to this thing. |
 //! | `UNSUPPORTED` | `unsupported` | configuring: the module or this deployment does not provide the op (a sibling not wired, a feature off). |
@@ -35,6 +36,19 @@
 //! boundary, never by a module: `trap` (the guest trapped; sentence is the
 //! trap), `unframed_refusal` (a peer refused with a string that is not
 //! framed). Keep them as constants too (`TRAP`, `UNFRAMED_REFUSAL`).
+//!
+//! Who may mint what. The frame carries no refuser, so a caller attributes a
+//! refusal to the module it addressed and may act on its sentence (a canvas
+//! shows a boards `stale` sentence as the other writer's words). That is safe
+//! only because the classes about the MODULE'S OWN STATE — `not_found`,
+//! `already_exists`, `stale`, `wrong_state`, `not_yet`, `unauthorized` — are
+//! minted by the addressed module and by nothing in front of it: no host hop
+//! (node admission, routing, `wasm-host`) ever answers with one. A host hop
+//! refuses with a host-reserved token, with a host-specific token of its own,
+//! or with a class about the request and the machinery (`invalid_input`,
+//! `capacity`, `unsupported`, `corrupt`), whose recovery is the same whoever
+//! says it. The inverse holds too: a module never produces a host-reserved
+//! token.
 //!
 //! Domain classes: allowed only when no canonical class matches AND the
 //! caller's recovery differs from every row above; named for the recovery, not
@@ -58,6 +72,8 @@ pub const WRONG_STATE: &str = "wrong_state";
 pub const INVALID_INPUT: &str = "invalid_input";
 /// sending less or removing something: a count, size or work bound is hit.
 pub const CAPACITY: &str = "capacity";
+/// waiting: the same request succeeds after a point the sentence names.
+pub const NOT_YET: &str = "not_yet";
 /// nothing: a monotonic counter cannot advance again; permanent.
 pub const EXHAUSTED: &str = "exhausted";
 /// acting as someone else: the actor may not do this to this thing.
@@ -87,6 +103,7 @@ mod tests {
             WRONG_STATE,
             INVALID_INPUT,
             CAPACITY,
+            NOT_YET,
             EXHAUSTED,
             UNAUTHORIZED,
             UNSUPPORTED,

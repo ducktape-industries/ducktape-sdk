@@ -123,12 +123,13 @@ impl PageError {
             | PageError::RecordStateNotFound(_) => refusal::NOT_FOUND,
             PageError::DuplicateBlock(_)
             | PageError::DuplicateComment(_)
-            | PageError::RecordCollectionExists(_) => refusal::ALREADY_EXISTS,
+            | PageError::RecordCollectionExists(_)
+            // a request id reused with different work: retrying that id can
+            // never succeed, so it is not STALE. The caller takes a new id.
+            | PageError::RecordRequestConflict => refusal::ALREADY_EXISTS,
             // a page cursor names a block; one that is gone or moved off the
             // page is re-read from the start, not fixed.
-            PageError::RecordRevisionConflict
-            | PageError::RecordRequestConflict
-            | PageError::InvalidPageCursor => refusal::STALE,
+            PageError::RecordRevisionConflict | PageError::InvalidPageCursor => refusal::STALE,
             PageError::ManagedPage
             | PageError::PageKindImmutable
             | PageError::TopLevelNonPage
