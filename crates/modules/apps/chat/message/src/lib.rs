@@ -401,21 +401,48 @@ pub fn mention_at(chars: &[char], at: usize) -> Option<(Party, usize)> {
 
 /// If `chars[at..]` opens with `marker` and has a later closing `marker`, the
 /// enclosed text and the total consumed length (markers included).
+///
+/// CommonMark's flanking rule decides what opens and what closes: a marker
+/// opens only with no space after it and closes only with no space before it,
+/// and a `_` marker additionally neither opens after a letter or digit nor
+/// closes before one. So `my_var_name` and `a * b * c` are plain text, while
+/// `*` may still emphasise part of a word (`un*believ*able`).
 fn fenced(chars: &[char], at: usize, marker: &str) -> Option<(String, usize)> {
     let marks: Vec<char> = marker.chars().collect();
-    let opens = chars[at..].starts_with(marks.as_slice());
-    if !opens {
+    if !chars[at..].starts_with(marks.as_slice()) {
         return None;
     }
+    let word_bound = marks[0] == '_';
     let body_start = at + marks.len();
+    if chars
+        .get(body_start)
+        .is_none_or(|next| next.is_whitespace())
+    {
+        return None;
+    }
+    // the word rule looks outside the whole RUN of markers, so the second
+    // `_` of `a__b` still sees the `a`.
+    let run_start = (0..at).rev().take_while(|&i| chars[i] == marks[0]).count();
+    if word_bound && at > run_start && chars[at - run_start - 1].is_alphanumeric() {
+        return None;
+    }
     let mut cursor = body_start;
     while cursor + marks.len() <= chars.len() {
         if chars[cursor..].starts_with(marks.as_slice()) {
-            let inner: String = chars[body_start..cursor].iter().collect();
-            if inner.is_empty() {
+            if cursor == body_start {
                 return None;
             }
-            return Some((inner, cursor + marks.len() - at));
+            let end = cursor + marks.len();
+            let space_before = chars[cursor - 1].is_whitespace();
+            let word_after = word_bound
+                && chars[end..]
+                    .iter()
+                    .find(|&&next| next != marks[0])
+                    .is_some_and(|next| next.is_alphanumeric());
+            if !space_before && !word_after {
+                let inner: String = chars[body_start..cursor].iter().collect();
+                return Some((inner, end - at));
+            }
         }
         cursor += 1;
     }
