@@ -84,7 +84,7 @@ pub fn encode_frame(frame: &ProxyFrame) -> Result<Vec<u8>, String> {
         ),
         ProxyFrame::BodyChunk(bytes) => {
             if bytes.len() > MAX_CHUNK_BYTES {
-                return Err(format!("gateway frame: chunk exceeds {MAX_CHUNK_BYTES} bytes"));
+                return Err(format!("frame: chunk exceeds {MAX_CHUNK_BYTES} bytes"));
             }
             (TYPE_BODY_CHUNK, bytes.clone())
         }
@@ -92,7 +92,7 @@ pub fn encode_frame(frame: &ProxyFrame) -> Result<Vec<u8>, String> {
         ProxyFrame::WsFrame { binary, payload } => {
             if payload.len() > MAX_WS_FRAME_BYTES {
                 return Err(format!(
-                    "gateway frame: ws frame exceeds {MAX_WS_FRAME_BYTES} bytes"
+                    "frame: ws frame exceeds {MAX_WS_FRAME_BYTES} bytes"
                 ));
             }
             let kind = if *binary {
@@ -232,19 +232,28 @@ mod tests {
     fn a_partial_frame_is_incomplete_not_an_error() {
         let full = encode_frame(&ProxyFrame::BodyChunk(b"hello".to_vec())).unwrap();
         assert_eq!(decode_frame(&full[..2]), Err(FrameError::Incomplete));
-        assert_eq!(decode_frame(&full[..full.len() - 1]), Err(FrameError::Incomplete));
+        assert_eq!(
+            decode_frame(&full[..full.len() - 1]),
+            Err(FrameError::Incomplete)
+        );
     }
 
     #[test]
     fn unknown_type_and_oversize_chunk_are_malformed() {
         let bogus = [99u8, 0, 0, 0, 0];
-        assert!(matches!(decode_frame(&bogus), Err(FrameError::Malformed(_))));
+        assert!(matches!(
+            decode_frame(&bogus),
+            Err(FrameError::Malformed(_))
+        ));
 
         // A body-chunk header claiming more than MAX_CHUNK_BYTES is rejected on
         // sight, before any large allocation.
         let mut oversize = vec![TYPE_BODY_CHUNK];
         oversize.extend_from_slice(&((MAX_CHUNK_BYTES as u32) + 1).to_be_bytes());
-        assert!(matches!(decode_frame(&oversize), Err(FrameError::Malformed(_))));
+        assert!(matches!(
+            decode_frame(&oversize),
+            Err(FrameError::Malformed(_))
+        ));
     }
 
     #[test]

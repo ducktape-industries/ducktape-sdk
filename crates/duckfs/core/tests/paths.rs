@@ -165,11 +165,12 @@ fn canonical_and_authority_table() {
     assert!(check_authority(&duckfs_core::Authority::System, &seg("/")).is_ok());
 }
 
-/// hygiene: every rejection out of the pure path layer carries the uniform
-/// `files: ` module prefix — these strings surface verbatim through commit
-/// rejections, so they must read like every other files error.
+/// hygiene: every rejection out of the pure path layer reads as one plain
+/// sentence with no `<module>: ` prefix — these strings surface verbatim
+/// through commit rejections, and the renderer prints the class token last,
+/// in brackets, so a prefix inside the sentence only repeats it.
 #[test]
-fn path_errors_carry_the_files_prefix() {
+fn path_errors_carry_no_module_prefix() {
     let seg = |p: &str| canonical(p).unwrap();
     for err in [
         canonical("shared/x").unwrap_err(),
@@ -203,6 +204,13 @@ fn path_errors_carry_the_files_prefix() {
         )
         .unwrap_err(),
     ] {
-        assert!(err.starts_with("files: "), "unprefixed path error: {err}");
+        assert!(
+            err.starts_with(|c: char| c.is_ascii_lowercase()),
+            "sentence must open on a lowercase word: {err}"
+        );
+        assert!(
+            !err.split(' ').next().unwrap_or_default().ends_with(':'),
+            "module-prefixed path error: {err}"
+        );
     }
 }

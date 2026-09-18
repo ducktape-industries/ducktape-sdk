@@ -1852,10 +1852,7 @@ impl WasmModule {
                     // staged delete is a guest bug — reject deterministically
                     // (identical on every validator) rather than panic.
                     let refs = overlay.ok_or_else(|| {
-                        SdkError::module(
-                            "refs_delete",
-                            "files: refs lane staged a delete, never valid",
-                        )
+                        SdkError::module("refs_delete", "refs lane staged a delete, never valid")
                     })?;
                     backing.borrow_mut().adopt_refs(&refs)?;
                 }

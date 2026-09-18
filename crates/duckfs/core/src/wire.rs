@@ -449,7 +449,7 @@ pub fn encode_write_output(output: &FilesWriteOutput) -> Vec<u8> {
 }
 
 pub fn decode_write_output(bytes: &[u8]) -> Result<FilesWriteOutput, String> {
-    serde_json::from_slice(bytes).map_err(|error| format!("files write output: {error}"))
+    serde_json::from_slice(bytes).map_err(|error| format!("write output: {error}"))
 }
 
 // ---- off-block object fetch (state sync / self-heal lane) ----
@@ -536,8 +536,8 @@ pub fn decode_refs_reply(resp: &[u8]) -> Result<Vec<u8>, String> {
     match decode_sync_resp(resp)? {
         FilesSyncResp::Refs { b64 } => STANDARD
             .decode(b64.as_bytes())
-            .map_err(|_| "files: refs reply is not valid base64".to_string()),
-        FilesSyncResp::Objects(_) => Err("files: expected a refs reply, got objects".into()),
+            .map_err(|_| "refs reply is not valid base64".to_string()),
+        FilesSyncResp::Objects(_) => Err("expected a refs reply, got objects".into()),
     }
 }
 
@@ -559,15 +559,14 @@ pub fn decode_objects_reply(resp: &[u8]) -> Result<Vec<(ObjectId, u8, Vec<u8>)>,
             .iter()
             .filter(|o| o.present)
             .map(|o| {
-                let id =
-                    from_hex_32(&o.id).ok_or_else(|| "files: reply id is not hex".to_string())?;
+                let id = from_hex_32(&o.id).ok_or_else(|| "reply id is not hex".to_string())?;
                 let body = STANDARD
                     .decode(o.b64.as_bytes())
-                    .map_err(|_| "files: reply body is not base64".to_string())?;
+                    .map_err(|_| "reply body is not base64".to_string())?;
                 Ok((id, o.kind, body))
             })
             .collect(),
-        FilesSyncResp::Refs { .. } => Err("files: expected an objects reply, got refs".into()),
+        FilesSyncResp::Refs { .. } => Err("expected an objects reply, got refs".into()),
     }
 }
 

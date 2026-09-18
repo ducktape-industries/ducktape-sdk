@@ -94,7 +94,7 @@ impl FileObj {
 
         let chunk_count = r.u32()? as usize;
         if chunk_count > MAX_CHUNKS_PER_FILE {
-            return Err("files: file chunk count over cap".into());
+            return Err("file chunk count over cap".into());
         }
         // do not pre-reserve to the declared count: it is untrusted until the
         // ids are actually read, so growth stays amortized instead.
@@ -105,17 +105,17 @@ impl FileObj {
 
         let meta_count = r.u16()? as usize;
         if meta_count > MAX_META_ENTRIES {
-            return Err("files: file meta count over cap".into());
+            return Err("file meta count over cap".into());
         }
         let mut meta: BTreeMap<String, String> = BTreeMap::new();
         for _ in 0..meta_count {
             let key = r.string()?;
             let value = r.string()?;
             if key.len() > MAX_META_KEY_BYTES {
-                return Err("files: file meta key over cap".into());
+                return Err("file meta key over cap".into());
             }
             if value.len() > MAX_META_VALUE_BYTES {
-                return Err("files: file meta value over cap".into());
+                return Err("file meta value over cap".into());
             }
             // strictly ascending keys keep the encoding canonical: no duplicate,
             // no reordered pair can produce a second valid preimage.
@@ -123,7 +123,7 @@ impl FileObj {
                 .last_key_value()
                 .is_some_and(|(last, _)| last.as_str() >= key.as_str())
             {
-                return Err("files: file meta keys not strictly ascending".into());
+                return Err("file meta keys not strictly ascending".into());
             }
             meta.insert(key, value);
         }
@@ -194,16 +194,16 @@ impl TreeObj {
         let mut r = Reader::new("object body", bytes);
         let entry_count = r.u32()? as usize;
         if entry_count > MAX_DIR_ENTRIES {
-            return Err("files: tree entry count over cap".into());
+            return Err("tree entry count over cap".into());
         }
         let mut entries: BTreeMap<String, TreeEntry> = BTreeMap::new();
         for _ in 0..entry_count {
             let name = r.string()?;
             if name.len() > MAX_NAME_BYTES {
-                return Err("files: tree entry name over cap".into());
+                return Err("tree entry name over cap".into());
             }
             let kind = EntryKind::from_u8(r.u8()?)
-                .ok_or_else(|| "files: tree entry has an unknown kind".to_string())?;
+                .ok_or_else(|| "tree entry has an unknown kind".to_string())?;
             let id = r.bytes32()?;
             let exec = r.boolean()?;
             let size = r.u64()?;
@@ -211,7 +211,7 @@ impl TreeObj {
                 .last_key_value()
                 .is_some_and(|(last, _)| last.as_str() >= name.as_str())
             {
-                return Err("files: tree names not strictly ascending".into());
+                return Err("tree names not strictly ascending".into());
             }
             entries.insert(
                 name,
@@ -273,7 +273,7 @@ impl SnapshotObj {
         let height = r.u64()?;
         let message = r.string()?;
         if message.len() > MAX_MESSAGE_BYTES {
-            return Err("files: snapshot message over cap".into());
+            return Err("snapshot message over cap".into());
         }
 
         r.finish()?;
@@ -308,24 +308,24 @@ pub fn verify_chunk_len_at(
 ) -> Result<(), String> {
     let n = chunk_count;
     if index >= n {
-        return Err("files: chunk index out of range".into());
+        return Err("chunk index out of range".into());
     }
     let expected = if index + 1 == n {
         let prefix = (n as u64 - 1)
             .checked_mul(CHUNK_SIZE)
-            .ok_or_else(|| "files: chunk prefix length overflows".to_string())?;
+            .ok_or_else(|| "chunk prefix length overflows".to_string())?;
         let last = size
             .checked_sub(prefix)
-            .ok_or_else(|| "files: file size smaller than its chunk count implies".to_string())?;
+            .ok_or_else(|| "file size smaller than its chunk count implies".to_string())?;
         if last == 0 || last > CHUNK_SIZE {
-            return Err("files: file size inconsistent with chunk count".into());
+            return Err("file size inconsistent with chunk count".into());
         }
         last
     } else {
         CHUNK_SIZE
     };
     if got_len != expected {
-        return Err("files: chunk length does not match the size rule".into());
+        return Err("chunk length does not match the size rule".into());
     }
     Ok(())
 }
@@ -344,22 +344,22 @@ pub fn verify_chunk_len_at(
 pub fn verify_file_shape(size: u64, chunk_count: usize) -> Result<(), String> {
     if size == 0 {
         if chunk_count != 0 {
-            return Err("files: an empty file must reference no chunks".into());
+            return Err("an empty file must reference no chunks".into());
         }
         return Ok(());
     }
     let n = chunk_count as u64;
     if n == 0 {
-        return Err("files: a non-empty file must reference at least one chunk".into());
+        return Err("a non-empty file must reference at least one chunk".into());
     }
     let lower = (n - 1)
         .checked_mul(CHUNK_SIZE)
-        .ok_or_else(|| "files: chunk span overflows".to_string())?;
+        .ok_or_else(|| "chunk span overflows".to_string())?;
     let upper = n
         .checked_mul(CHUNK_SIZE)
-        .ok_or_else(|| "files: chunk span overflows".to_string())?;
+        .ok_or_else(|| "chunk span overflows".to_string())?;
     if size <= lower || size > upper {
-        return Err("files: file size inconsistent with its chunk count".into());
+        return Err("file size inconsistent with its chunk count".into());
     }
     Ok(())
 }

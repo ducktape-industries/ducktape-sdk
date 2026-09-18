@@ -188,7 +188,7 @@ pub fn decode_refs(bytes: &[u8]) -> Result<Refs, String> {
     // the byte cap first: no honest image is larger (every growth path
     // refuses past it), and a larger one could not be served to a joiner.
     if bytes.len() > MAX_REFS_IMAGE_BYTES {
-        return Err("files: refs image exceeds the byte cap".into());
+        return Err("refs image exceeds the byte cap".into());
     }
     let mut r = Reader::new("refs image", bytes);
 
@@ -200,7 +200,7 @@ pub fn decode_refs(bytes: &[u8]) -> Result<Refs, String> {
 
     let window_count = r.u32()? as usize;
     if window_count > HISTORY_WINDOW {
-        return Err("files: refs window count over cap".into());
+        return Err("refs window count over cap".into());
     }
     let mut window = VecDeque::new();
     for _ in 0..window_count {
@@ -209,7 +209,7 @@ pub fn decode_refs(bytes: &[u8]) -> Result<Refs, String> {
 
     let pin_count = r.u32()? as usize;
     if pin_count > MAX_PINS {
-        return Err("files: refs pin count over cap".into());
+        return Err("refs pin count over cap".into());
     }
     let mut pins: BTreeMap<String, PinEntry> = BTreeMap::new();
     for _ in 0..pin_count {
@@ -222,14 +222,14 @@ pub fn decode_refs(bytes: &[u8]) -> Result<Refs, String> {
             .last_key_value()
             .is_some_and(|(last, _)| last.as_str() >= name.as_str())
         {
-            return Err("files: refs pins not strictly ascending".into());
+            return Err("refs pins not strictly ascending".into());
         }
         pins.insert(name, PinEntry { snapshot, owner });
     }
 
     let staging_count = r.u32()? as usize;
     if staging_count > MAX_STAGING_ENTRIES {
-        return Err("files: refs staging count over cap".into());
+        return Err("refs staging count over cap".into());
     }
     let mut staging: BTreeMap<ObjectId, Staged> = BTreeMap::new();
     for _ in 0..staging_count {
@@ -241,7 +241,7 @@ pub fn decode_refs(bytes: &[u8]) -> Result<Refs, String> {
             .last_key_value()
             .is_some_and(|(last, _)| last >= &digest)
         {
-            return Err("files: refs staging not strictly ascending".into());
+            return Err("refs staging not strictly ascending".into());
         }
         staging.insert(
             digest,
@@ -255,7 +255,7 @@ pub fn decode_refs(bytes: &[u8]) -> Result<Refs, String> {
 
     let watch_count = r.u32()? as usize;
     if watch_count > MAX_WATCHES {
-        return Err("files: refs watch count over cap".into());
+        return Err("refs watch count over cap".into());
     }
     let mut watches: BTreeSet<(String, String)> = BTreeSet::new();
     let mut last_watch: Option<(String, String)> = None;
@@ -264,7 +264,7 @@ pub fn decode_refs(bytes: &[u8]) -> Result<Refs, String> {
         let module_id = r.string()?;
         let entry = (prefix, module_id);
         if last_watch.as_ref().is_some_and(|last| last >= &entry) {
-            return Err("files: refs watches not strictly ascending".into());
+            return Err("refs watches not strictly ascending".into());
         }
         last_watch = Some(entry.clone());
         watches.insert(entry);
@@ -335,8 +335,8 @@ pub fn decode_block_objects(bytes: &[u8]) -> Result<BTreeMap<ObjectId, (Kind, u6
     let mut index = BTreeMap::new();
     for _ in 0..count {
         let id = r.bytes32()?;
-        let kind = Kind::from_u8(r.u8()?)
-            .ok_or_else(|| "files: block objects unknown kind tag".to_string())?;
+        let kind =
+            Kind::from_u8(r.u8()?).ok_or_else(|| "block objects unknown kind tag".to_string())?;
         let len = r.u64()?;
         index.insert(id, (kind, len));
     }
@@ -438,7 +438,7 @@ mod refs_image_tests {
         let oversized = vec![0u8; MAX_REFS_IMAGE_BYTES + 1];
         assert_eq!(
             decode_refs(&oversized).unwrap_err(),
-            "files: refs image exceeds the byte cap"
+            "refs image exceeds the byte cap"
         );
     }
 }

@@ -68,7 +68,7 @@ impl DiskStore {
 pub(crate) fn fsync_dir(dir: &Path) -> Result<(), String> {
     std::fs::File::open(dir)
         .and_then(|f| f.sync_all())
-        .map_err(|e| format!("files: fsync dir {}: {e}", dir.display()))
+        .map_err(|e| format!("fsync dir {}: {e}", dir.display()))
 }
 
 /// recursively remove every `*.tmp` file under `dir` (crash debris from a write
@@ -110,8 +110,7 @@ impl ObjectStore for DiskStore {
             return Ok(id);
         }
         let subdir = self.dir.join(&hex[..2]);
-        std::fs::create_dir_all(&subdir)
-            .map_err(|e| format!("files: odb put {hex}: mkdir: {e}"))?;
+        std::fs::create_dir_all(&subdir).map_err(|e| format!("odb put {hex}: mkdir: {e}"))?;
         // tmp lives in the destination subdir so the rename below is same-dir
         // (and therefore atomic). the full hex keeps the tmp name unique.
         let tmp = subdir.join(format!("{hex}.tmp"));
@@ -121,18 +120,18 @@ impl ObjectStore for DiskStore {
         // scope the file so it is closed before the rename on every platform.
         {
             let mut f = std::fs::File::create(&tmp)
-                .map_err(|e| format!("files: odb put {hex}: create tmp: {e}"))?;
+                .map_err(|e| format!("odb put {hex}: create tmp: {e}"))?;
             f.write_all(&buf)
-                .map_err(|e| format!("files: odb put {hex}: write tmp: {e}"))?;
+                .map_err(|e| format!("odb put {hex}: write tmp: {e}"))?;
             // durable before publish: the bytes must hit disk before the rename
             // makes them reachable under the content-addressed name.
             f.sync_all()
-                .map_err(|e| format!("files: odb put {hex}: fsync tmp: {e}"))?;
+                .map_err(|e| format!("odb put {hex}: fsync tmp: {e}"))?;
         }
         std::fs::rename(&tmp, &dest).map_err(|e| {
             // a failed publish must not leave debris under the object name.
             let _ = std::fs::remove_file(&tmp);
-            format!("files: odb put {hex}: rename: {e}")
+            format!("odb put {hex}: rename: {e}")
         })?;
         // the rename made a new dir-entry in `subdir`; remember it so the block
         // glue can fsync it before the refs commit point (see `sync_dirs`).
@@ -146,18 +145,18 @@ impl ObjectStore for DiskStore {
             Ok(raw) => raw,
             // absent is Ok(None), sharply distinct from a corrupt Err below.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("files: odb get {hex}: {e}")),
+            Err(e) => return Err(format!("odb get {hex}: {e}")),
         };
         let (tag, body) = raw
             .split_first()
-            .ok_or_else(|| format!("files: odb get {hex}: object file is empty"))?;
-        let kind = Kind::from_u8(*tag)
-            .ok_or_else(|| format!("files: odb get {hex}: unknown kind tag {tag}"))?;
+            .ok_or_else(|| format!("odb get {hex}: object file is empty"))?;
+        let kind =
+            Kind::from_u8(*tag).ok_or_else(|| format!("odb get {hex}: unknown kind tag {tag}"))?;
         // re-derive and verify: the disk is untrusted, so a bit-flip must surface
         // as an error rather than return wrong bytes under a trusted id.
         if object_id(kind, body) != *id {
             return Err(format!(
-                "files: odb get {hex}: content hash mismatch (corrupt object)"
+                "odb get {hex}: content hash mismatch (corrupt object)"
             ));
         }
         Ok(Some((kind, body.to_vec())))
@@ -180,7 +179,7 @@ impl ObjectStore for DiskStore {
         let raw = match std::fs::read(&path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(format!("files: odb verify {hex}: {e}")),
+            Err(e) => return Err(format!("odb verify {hex}: {e}")),
         };
         let intact = match raw.split_first() {
             Some((tag, body)) => match Kind::from_u8(*tag) {
@@ -206,20 +205,19 @@ impl ObjectStore for DiskStore {
             Ok(f) => f,
             // absent is Ok(None), sharply distinct from a corrupt Err below.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("files: odb stat {hex}: {e}")),
+            Err(e) => return Err(format!("odb stat {hex}: {e}")),
         };
         let len = f
             .metadata()
-            .map_err(|e| format!("files: odb stat {hex}: {e}"))?
+            .map_err(|e| format!("odb stat {hex}: {e}"))?
             .len();
         if len == 0 {
-            return Err(format!("files: odb stat {hex}: object file is empty"));
+            return Err(format!("odb stat {hex}: object file is empty"));
         }
         let mut tag = [0u8; 1];
-        std::io::Read::read_exact(&mut f, &mut tag)
-            .map_err(|e| format!("files: odb stat {hex}: {e}"))?;
+        std::io::Read::read_exact(&mut f, &mut tag).map_err(|e| format!("odb stat {hex}: {e}"))?;
         let kind = Kind::from_u8(tag[0])
-            .ok_or_else(|| format!("files: odb stat {hex}: unknown kind tag {}", tag[0]))?;
+            .ok_or_else(|| format!("odb stat {hex}: unknown kind tag {}", tag[0]))?;
         Ok(Some((kind, len - 1)))
     }
 
@@ -229,7 +227,7 @@ impl ObjectStore for DiskStore {
             Ok(()) => Ok(()),
             // a missing object is already removed — idempotent, not an error.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("files: odb remove {hex}: {e}")),
+            Err(e) => Err(format!("odb remove {hex}: {e}")),
         }
     }
 
@@ -238,10 +236,10 @@ impl ObjectStore for DiskStore {
         let top = match std::fs::read_dir(&self.dir) {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(format!("files: odb list: {e}")),
+            Err(e) => return Err(format!("odb list: {e}")),
         };
         for aa_entry in top {
-            let aa_entry = aa_entry.map_err(|e| format!("files: odb list: {e}"))?;
+            let aa_entry = aa_entry.map_err(|e| format!("odb list: {e}"))?;
             let aa_name = aa_entry.file_name();
             let Some(aa) = aa_name.to_str() else { continue };
             // fanout dirs are exactly two hex chars; anything else is foreign.
@@ -250,15 +248,15 @@ impl ObjectStore for DiskStore {
             }
             if !aa_entry
                 .file_type()
-                .map_err(|e| format!("files: odb list: {e}"))?
+                .map_err(|e| format!("odb list: {e}"))?
                 .is_dir()
             {
                 continue;
             }
             for f_entry in
-                std::fs::read_dir(aa_entry.path()).map_err(|e| format!("files: odb list: {e}"))?
+                std::fs::read_dir(aa_entry.path()).map_err(|e| format!("odb list: {e}"))?
             {
-                let f_entry = f_entry.map_err(|e| format!("files: odb list: {e}"))?;
+                let f_entry = f_entry.map_err(|e| format!("odb list: {e}"))?;
                 let f_name = f_entry.file_name();
                 let Some(rest) = f_name.to_str() else {
                     continue;
@@ -352,8 +350,7 @@ impl DiskRefs {
     /// open over the module data dir, creating it if absent (the refs file and
     /// its tmp are written here, and the dir is fsync'd on save).
     pub fn open(dir: PathBuf) -> Result<Self, String> {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("files: refs open {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("refs open {}: {e}", dir.display()))?;
         Ok(Self { dir })
     }
 
@@ -370,27 +367,27 @@ impl RefsStore for DiskRefs {
             Ok(raw) => raw,
             // absent = a fresh node, sharply distinct from a corrupt Err below.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("files: refs load: {e}")),
+            Err(e) => return Err(format!("refs load: {e}")),
         };
         if raw.len() < REFS_FIXED_LEN {
-            return Err("files: refs file shorter than its envelope".into());
+            return Err("refs file shorter than its envelope".into());
         }
         if &raw[..8] != REFS_MAGIC {
-            return Err("files: refs file magic mismatch".into());
+            return Err("refs file magic mismatch".into());
         }
         let height = u64::from_le_bytes(raw[8..16].try_into().expect("8 bytes"));
         let gc_watermark = u64::from_le_bytes(raw[16..24].try_into().expect("8 bytes"));
         let payload_len = u64::from_le_bytes(raw[24..32].try_into().expect("8 bytes"));
-        let payload_len = usize::try_from(payload_len)
-            .map_err(|_| "files: refs payload_len overflow".to_string())?;
+        let payload_len =
+            usize::try_from(payload_len).map_err(|_| "refs payload_len overflow".to_string())?;
         // the total length must be EXACTLY the envelope + declared payload — a
         // short file is a truncation, a long one carries trailing bytes; both
         // reject rather than decode a partial/padded image.
         let want = REFS_FIXED_LEN
             .checked_add(payload_len)
-            .ok_or_else(|| "files: refs payload_len overflow".to_string())?;
+            .ok_or_else(|| "refs payload_len overflow".to_string())?;
         if raw.len() != want {
-            return Err("files: refs file length does not match payload_len".into());
+            return Err("refs file length does not match payload_len".into());
         }
         let payload = &raw[32..32 + payload_len];
         let stored_sum = &raw[32 + payload_len..];
@@ -398,7 +395,7 @@ impl RefsStore for DiskRefs {
         h.update(payload);
         let sum: [u8; 32] = h.finalize().into();
         if stored_sum != sum {
-            return Err("files: refs file checksum mismatch (corrupt)".into());
+            return Err("refs file checksum mismatch (corrupt)".into());
         }
         // strict decode: even a checksum-valid but non-canonical payload rejects.
         let refs = decode_refs(payload)?;
@@ -423,21 +420,21 @@ impl RefsStore for DiskRefs {
         // scope the file so it is closed before the rename on every platform.
         {
             let mut f = std::fs::File::create(&tmp)
-                .map_err(|e| format!("files: refs save: create tmp: {e}"))?;
+                .map_err(|e| format!("could not create the refs temp file: {e}"))?;
             f.write_all(&buf)
-                .map_err(|e| format!("files: refs save: write tmp: {e}"))?;
+                .map_err(|e| format!("could not write the refs temp file: {e}"))?;
             // the bytes must be durable before the rename publishes them.
             f.sync_all()
-                .map_err(|e| format!("files: refs save: fsync tmp: {e}"))?;
+                .map_err(|e| format!("could not fsync the refs temp file: {e}"))?;
         }
         std::fs::rename(&tmp, &dest).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            format!("files: refs save: rename: {e}")
+            format!("could not rename the refs temp file into place: {e}")
         })?;
         // the rename is the commit point; fsync the parent dir so its dir-entry
         // (pointing at the new refs file) is itself durable — otherwise a crash
         // could lose the rename even though the file bytes were synced.
-        fsync_dir(&self.dir).map_err(|e| format!("files: refs save: {e}"))?;
+        fsync_dir(&self.dir)?;
         Ok(())
     }
 }

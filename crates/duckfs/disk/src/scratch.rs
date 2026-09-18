@@ -63,12 +63,12 @@ impl SyncScratch {
     pub fn prepare(canonical: &Path, attempt: usize) -> Result<Self, String> {
         let dir = attempt_dir(canonical, attempt)?;
         let stale: Vec<PathBuf> = scratch_siblings(canonical)
-            .map_err(|e| format!("files scratch: enumerate stale dirs: {e}"))?
+            .map_err(|e| format!("scratch: enumerate stale dirs: {e}"))?
             .into_iter()
             .filter(|p| *p != dir)
             .collect();
         std::fs::create_dir_all(dir.join("objects"))
-            .map_err(|e| format!("files scratch: create {}: {e}", dir.display()))?;
+            .map_err(|e| format!("scratch: create {}: {e}", dir.display()))?;
         // a same-name leftover from a crashed prior run: its refs are stale
         // (the sync installs fresh, root-verified refs before anything reads
         // them) — drop them so `Files::open` starts from empty refs; its
@@ -76,7 +76,7 @@ impl SyncScratch {
         match std::fs::remove_file(dir.join("refs")) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("files scratch: clear stale refs: {e}")),
+            Err(e) => return Err(format!("scratch: clear stale refs: {e}")),
         }
         merge_objects(&canonical.join("objects"), &dir.join("objects"))?;
         for s in &stale {
@@ -114,14 +114,14 @@ impl SyncScratch {
     /// that all already exist, and rewrites an identical refs file.
     pub fn promote(&self, expected_root: [u8; 32]) -> Result<(), String> {
         let (refs, height, gc_watermark) = DiskRefs::open(self.dir.clone())
-            .map_err(|e| format!("files promote: open scratch refs: {e}"))?
+            .map_err(|e| format!("promote: open scratch refs: {e}"))?
             .load()
-            .map_err(|e| format!("files promote: load scratch refs: {e}"))?
-            .ok_or_else(|| "files promote: the scratch holds no synced refs image".to_string())?;
+            .map_err(|e| format!("promote: load scratch refs: {e}"))?
+            .ok_or_else(|| "promote: the scratch holds no synced refs image".to_string())?;
         let got = root_bytes(&refs);
         if got != expected_root {
             return Err(format!(
-                "files promote: scratch refs root {} != expected root {}",
+                "promote: scratch refs root {} != expected root {}",
                 to_hex(&got),
                 to_hex(&expected_root),
             ));
@@ -130,14 +130,14 @@ impl SyncScratch {
         let touched = merge_objects(&self.dir.join("objects"), &canonical_odb)?;
         if !touched.is_empty() {
             for d in &touched {
-                fsync_dir(d).map_err(|e| format!("files promote: {e}"))?;
+                fsync_dir(d)?;
             }
-            fsync_dir(&canonical_odb).map_err(|e| format!("files promote: {e}"))?;
+            fsync_dir(&canonical_odb)?;
         }
         DiskRefs::open(self.canonical.clone())
-            .map_err(|e| format!("files promote: open canonical refs: {e}"))?
+            .map_err(|e| format!("promote: open canonical refs: {e}"))?
             .save(&refs, height, gc_watermark)
-            .map_err(|e| format!("files promote: save canonical refs: {e}"))?;
+            .map_err(|e| format!("promote: save canonical refs: {e}"))?;
         let _ = std::fs::remove_dir_all(&self.dir);
         Ok(())
     }
@@ -163,7 +163,7 @@ fn attempt_dir(canonical: &Path, attempt: usize) -> Result<PathBuf, String> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| {
             format!(
-                "files scratch: canonical dir {} has no utf-8 name",
+                "scratch: canonical dir {} has no utf-8 name",
                 canonical.display()
             )
         })?;
@@ -220,7 +220,7 @@ fn merge_objects(src: &Path, dst: &Path) -> Result<BTreeSet<PathBuf>, String> {
             return Ok(()); // content-addressed: already exactly these bytes
         }
         std::fs::create_dir_all(&sub)
-            .map_err(|e| format!("files scratch: mkdir {}: {e}", sub.display()))?;
+            .map_err(|e| format!("scratch: mkdir {}: {e}", sub.display()))?;
         place_object(src_path, &dst_path)?;
         touched.insert(sub.clone());
         Ok(())
@@ -235,7 +235,7 @@ fn for_each_object(
     src: &Path,
     mut f: impl FnMut(&str, &str, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    let ctx = |e: std::io::Error| format!("files scratch: walk {}: {e}", src.display());
+    let ctx = |e: std::io::Error| format!("scratch: walk {}: {e}", src.display());
     let top = match std::fs::read_dir(src) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -275,13 +275,13 @@ fn place_object(src: &Path, dst: &Path) -> Result<(), String> {
         Err(_) => {
             let tmp = dst.with_extension("tmp");
             std::fs::copy(src, &tmp)
-                .map_err(|e| format!("files scratch: copy {}: {e}", src.display()))?;
+                .map_err(|e| format!("scratch: copy {}: {e}", src.display()))?;
             std::fs::File::open(&tmp)
                 .and_then(|file| file.sync_all())
-                .map_err(|e| format!("files scratch: fsync {}: {e}", tmp.display()))?;
+                .map_err(|e| format!("scratch: fsync {}: {e}", tmp.display()))?;
             std::fs::rename(&tmp, dst).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
-                format!("files scratch: publish {}: {e}", dst.display())
+                format!("scratch: publish {}: {e}", dst.display())
             })
         }
     }

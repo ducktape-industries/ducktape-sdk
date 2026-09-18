@@ -70,7 +70,7 @@ pub(crate) fn mark(refs: &Refs, store: &dyn ObjectStore) -> Result<BTreeSet<Obje
         let mut missing = BTreeSet::new();
         collect_retention(&root, store, &mut live, &mut missing, false)?;
         if let Some(id) = missing.first() {
-            return Err(format!("files: gc: root object missing: {}", to_hex(id)));
+            return Err(format!("root object missing: {}", to_hex(id)));
         }
     }
     Ok(live)
@@ -158,7 +158,7 @@ fn collect_retention(
     while let Some((id, kind, depth)) = stack.pop() {
         let excessive_depth = depth > crate::retention::CATALOG_DEPTH;
         if excessive_depth {
-            return Err("files: retention catalog depth exceeded".into());
+            return Err("retention catalog depth exceeded".into());
         }
         if !catalog.insert(id) {
             continue;
@@ -177,7 +177,7 @@ fn collect_retention(
                         EntryKind::Dir => Kind::Tree,
                         EntryKind::File => Kind::File,
                         EntryKind::Symlink => {
-                            return Err("files: symlink in retention catalog".into());
+                            return Err("symlink in retention catalog".into());
                         }
                     };
                     stack.push((entry.id, child_kind, depth + 1));
@@ -188,7 +188,7 @@ fn collect_retention(
                 collect_snapshot(&snapshot, store, visited, missing, verify_chunks)?;
             }
             Kind::Chunk | Kind::Snapshot => {
-                return Err("files: invalid retention catalog edge".into());
+                return Err("invalid retention catalog edge".into());
             }
         }
     }
@@ -365,7 +365,7 @@ fn mark_chunk(
         return Ok(());
     }
     if !store.has(id) {
-        return Err(format!("files: gc: root object missing: {}", to_hex(id)));
+        return Err(format!("root object missing: {}", to_hex(id)));
     }
     Ok(())
 }
@@ -376,11 +376,11 @@ fn mark_chunk(
 /// sweeps nothing.
 fn fetch(store: &dyn ObjectStore, id: &ObjectId, expected: Kind) -> Result<Vec<u8>, String> {
     match store.get(id)? {
-        None => Err(format!("files: gc: root object missing: {}", to_hex(id))),
+        None => Err(format!("root object missing: {}", to_hex(id))),
         Some((kind, body)) => {
             if kind != expected {
                 return Err(format!(
-                    "files: gc: corrupt object graph: {} is not a {:?}",
+                    "corrupt object graph: {} is not a {:?}",
                     to_hex(id),
                     expected
                 ));

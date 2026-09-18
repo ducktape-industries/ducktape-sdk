@@ -52,7 +52,7 @@ impl<'a> Reader<'a> {
             .off
             .checked_add(N)
             .filter(|&end| end <= self.bytes.len())
-            .ok_or_else(|| format!("files: {} truncated", self.what))?;
+            .ok_or_else(|| format!("{} truncated", self.what))?;
         let mut buf = [0u8; N];
         buf.copy_from_slice(&self.bytes[self.off..end]);
         self.off = end;
@@ -85,7 +85,7 @@ impl<'a> Reader<'a> {
         match self.u8()? {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(format!("files: {} boolean byte is not 0/1", self.what)),
+            _ => Err(format!("{} boolean byte is not 0/1", self.what)),
         }
     }
 
@@ -94,27 +94,26 @@ impl<'a> Reader<'a> {
     /// bogus length truncates rather than over-allocating.
     pub(crate) fn bytes(&mut self) -> Result<Vec<u8>, String> {
         let len = self.u64()?;
-        let len = usize::try_from(len).map_err(|_| format!("files: {} truncated", self.what))?;
+        let len = usize::try_from(len).map_err(|_| format!("{} truncated", self.what))?;
         let end = self
             .off
             .checked_add(len)
             .filter(|&end| end <= self.bytes.len())
-            .ok_or_else(|| format!("files: {} truncated", self.what))?;
+            .ok_or_else(|| format!("{} truncated", self.what))?;
         let value = self.bytes[self.off..end].to_vec();
         self.off = end;
         Ok(value)
     }
 
     pub(crate) fn string(&mut self) -> Result<String, String> {
-        String::from_utf8(self.bytes()?)
-            .map_err(|_| format!("files: {} string is not utf-8", self.what))
+        String::from_utf8(self.bytes()?).map_err(|_| format!("{} string is not utf-8", self.what))
     }
 
     /// every byte must be accounted for — a decode that stops short of the
     /// end saw trailing bytes and is not canonical.
     pub(crate) fn finish(self) -> Result<(), String> {
         if self.off != self.bytes.len() {
-            return Err(format!("files: {} has trailing bytes", self.what));
+            return Err(format!("{} has trailing bytes", self.what));
         }
         Ok(())
     }
@@ -153,34 +152,28 @@ mod tests {
         // truncated fixed-width read.
         let mut r = Reader::new("refs image", &[0u8; 3]);
         let err = r.u32().unwrap_err();
-        assert_eq!(err, "files: refs image truncated");
+        assert_eq!(err, "refs image truncated");
 
         // non-canonical boolean byte.
         let mut r = Reader::new("object body", &[2u8]);
         let err = r.boolean().unwrap_err();
-        assert_eq!(err, "files: object body boolean byte is not 0/1");
+        assert_eq!(err, "object body boolean byte is not 0/1");
 
         // string length running past the end truncates, never allocates.
         let mut lying = (u64::MAX).to_le_bytes().to_vec();
         lying.push(b'x');
         let mut r = Reader::new("refs image", &lying);
-        assert_eq!(r.string().unwrap_err(), "files: refs image truncated");
+        assert_eq!(r.string().unwrap_err(), "refs image truncated");
 
         // non-utf-8 string bytes reject.
         let mut bad = 1u64.to_le_bytes().to_vec();
         bad.push(0xFF);
         let mut r = Reader::new("object body", &bad);
-        assert_eq!(
-            r.string().unwrap_err(),
-            "files: object body string is not utf-8"
-        );
+        assert_eq!(r.string().unwrap_err(), "object body string is not utf-8");
 
         // trailing bytes reject at finish.
         let mut r = Reader::new("refs image", &[0u8; 2]);
         r.u8().unwrap();
-        assert_eq!(
-            r.finish().unwrap_err(),
-            "files: refs image has trailing bytes"
-        );
+        assert_eq!(r.finish().unwrap_err(), "refs image has trailing bytes");
     }
 }

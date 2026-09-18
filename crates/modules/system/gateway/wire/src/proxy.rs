@@ -137,18 +137,14 @@ pub fn encode_proxy_request_head(head: &ProxyRequestHead) -> Result<Vec<u8>, Str
     validate_proxy_request_head(head)?;
     let bytes = serde_json::to_vec(head).map_err(|error| error.to_string())?;
     if bytes.len() > MAX_PROXY_HEAD_BYTES {
-        return Err(format!(
-            "gateway proxy: head exceeds {MAX_PROXY_HEAD_BYTES} bytes"
-        ));
+        return Err(format!("proxy: head exceeds {MAX_PROXY_HEAD_BYTES} bytes"));
     }
     Ok(bytes)
 }
 
 pub fn decode_proxy_request_head(bytes: &[u8]) -> Result<ProxyRequestHead, String> {
     if bytes.len() > MAX_PROXY_HEAD_BYTES {
-        return Err(format!(
-            "gateway proxy: head exceeds {MAX_PROXY_HEAD_BYTES} bytes"
-        ));
+        return Err(format!("proxy: head exceeds {MAX_PROXY_HEAD_BYTES} bytes"));
     }
     let head: ProxyRequestHead =
         serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
@@ -160,7 +156,7 @@ pub fn validate_proxy_request_head(head: &ProxyRequestHead) -> Result<(), String
     validate_account_number(head.account_id)?;
     head.name.validate()?;
     if head.revision == 0 {
-        return Err("gateway proxy: revision starts at 1".into());
+        return Err("proxy: revision starts at 1".into());
     }
     validate_origin_form(&head.path_and_query)?;
     validate_headers(&head.headers, "request")?;
@@ -170,21 +166,21 @@ pub fn validate_proxy_request_head(head: &ProxyRequestHead) -> Result<(), String
     // at all, so the first body frame on one of those is the refusal, and
     // `request_body_allowance` is what says so.
     if head.upgrade && head.method != RouteMethod::Get {
-        return Err("gateway proxy: a WebSocket upgrade must be a bodyless GET".into());
+        return Err("proxy: a WebSocket upgrade must be a bodyless GET".into());
     }
     Ok(())
 }
 
 pub fn validate_response_head(head: &ProxyResponseHead) -> Result<(), String> {
     if !(200..=599).contains(&head.status) {
-        return Err("gateway proxy: invalid upstream status".into());
+        return Err("proxy: invalid upstream status".into());
     }
     validate_headers(&head.headers, "response")?;
     // Responses stay fail-closed on an allowlist (see `ALLOWED_RESPONSE_HEADERS`).
     for header in &head.headers {
         if !ALLOWED_RESPONSE_HEADERS.contains(&header.name.as_str()) {
             return Err(format!(
-                "gateway proxy: disallowed response header {:?}",
+                "proxy: disallowed response header {:?}",
                 header.name
             ));
         }
@@ -203,7 +199,7 @@ pub fn validate_origin_form(value: &str) -> Result<(), String> {
         || value.contains(['\r', '\n', '\\', '#'])
         || !value.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
     {
-        return Err("gateway proxy: invalid origin-form path/query".into());
+        return Err("proxy: invalid origin-form path/query".into());
     }
     // URL clients remove these segments before sending. Refuse them so the
     // path verified by the publisher is the path the upstream receives.
@@ -215,7 +211,7 @@ pub fn validate_origin_form(value: &str) -> Result<(), String> {
         )
     });
     if normalized_by_clients {
-        return Err("gateway proxy: path contains a URL-normalized segment".into());
+        return Err("proxy: path contains a URL-normalized segment".into());
     }
     Ok(())
 }
@@ -228,7 +224,7 @@ pub fn validate_safe_location(value: &str) -> Result<(), String> {
         || value.contains(['\r', '\n', '\\'])
         || !value.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
     {
-        return Err("gateway proxy: unsafe redirect location".into());
+        return Err("proxy: unsafe redirect location".into());
     }
     Ok(())
 }
@@ -236,7 +232,7 @@ pub fn validate_safe_location(value: &str) -> Result<(), String> {
 pub fn validate_headers(headers: &[ProxyHeader], kind: &str) -> Result<(), String> {
     if headers.len() > MAX_HEADERS {
         return Err(format!(
-            "gateway proxy: too many {kind} headers (max {MAX_HEADERS})"
+            "proxy: too many {kind} headers (max {MAX_HEADERS})"
         ));
     }
     let mut previous: Option<&str> = None;
@@ -259,13 +255,13 @@ pub fn validate_headers(headers: &[ProxyHeader], kind: &str) -> Result<(), Strin
             // detail that gets byte-bounded, and in the node's log ring.
             let offset = first_bad_byte.map_or_else(|| "none".to_string(), |at| at.to_string());
             return Err(format!(
-                "gateway proxy: malformed {kind} header name (len {}, first invalid byte at {offset})",
+                "proxy: malformed {kind} header name (len {}, first invalid byte at {offset})",
                 header.name.len()
             ));
         }
         if header.name.starts_with("x-duck-") {
             return Err(format!(
-                "gateway proxy: {kind} header {:?} spoofs a proxy-minted header",
+                "proxy: {kind} header {:?} spoofs a proxy-minted header",
                 header.name
             ));
         }
@@ -281,7 +277,7 @@ pub fn validate_headers(headers: &[ProxyHeader], kind: &str) -> Result<(), Strin
         });
         if out_of_order {
             return Err(format!(
-                "gateway proxy: {kind} headers must be sorted, and unique except set-cookie"
+                "proxy: {kind} headers must be sorted, and unique except set-cookie"
             ));
         }
         previous = Some(&header.name);
@@ -291,17 +287,17 @@ pub fn validate_headers(headers: &[ProxyHeader], kind: &str) -> Result<(), Strin
             || header.value.bytes().any(|byte| byte < b' ' || byte == 0x7f)
         {
             return Err(format!(
-                "gateway proxy: invalid value for {kind} header {:?}",
+                "proxy: invalid value for {kind} header {:?}",
                 header.name
             ));
         }
         total = total
             .checked_add(header.name.len() + header.value.len())
-            .ok_or_else(|| "gateway proxy: header size overflow".to_string())?;
+            .ok_or_else(|| "proxy: header size overflow".to_string())?;
     }
     if total > MAX_HEADER_BYTES {
         return Err(format!(
-            "gateway proxy: {kind} headers exceed {MAX_HEADER_BYTES} bytes"
+            "proxy: {kind} headers exceed {MAX_HEADER_BYTES} bytes"
         ));
     }
     Ok(())

@@ -463,7 +463,7 @@ impl duckfs_core::ObjectStore for GuestOdb {
     ) -> Result<duckfs_core::ObjectId, String> {
         let id = host::object_put(kind.tag(), body);
         id.try_into()
-            .map_err(|_| "files: host object-put returned a non-32-byte id".to_string())
+            .map_err(|_| "host object-put returned a non-32-byte id".to_string())
     }
 
     fn get(
@@ -475,9 +475,9 @@ impl duckfs_core::ObjectStore for GuestOdb {
         };
         let (&tag, body) = tagged
             .split_first()
-            .ok_or_else(|| "files: host object-get returned an empty tagged body".to_string())?;
+            .ok_or_else(|| "host object-get returned an empty tagged body".to_string())?;
         let kind = duckfs_core::Kind::from_u8(tag)
-            .ok_or_else(|| "files: host object-get returned an unknown kind tag".to_string())?;
+            .ok_or_else(|| "host object-get returned an unknown kind tag".to_string())?;
         Ok(Some((kind, body.to_vec())))
     }
 
@@ -490,16 +490,16 @@ impl duckfs_core::ObjectStore for GuestOdb {
             return Ok(None);
         };
         let kind = duckfs_core::Kind::from_u8(tag)
-            .ok_or_else(|| "files: host object-stat returned an unknown kind tag".to_string())?;
+            .ok_or_else(|| "host object-stat returned an unknown kind tag".to_string())?;
         Ok(Some((kind, len)))
     }
 
     fn remove(&mut self, _id: &duckfs_core::ObjectId) -> Result<(), String> {
-        Err("files: object removal is host-side — the guest odb is read+stage only".into())
+        Err("object removal is host-side — the guest odb is read+stage only".into())
     }
 
     fn list(&self) -> Result<Vec<duckfs_core::ObjectId>, String> {
-        Err("files: object enumeration is host-side — the guest odb is read+stage only".into())
+        Err("object enumeration is host-side — the guest odb is read+stage only".into())
     }
 }
 

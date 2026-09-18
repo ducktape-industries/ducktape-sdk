@@ -50,26 +50,26 @@ impl Actor {
             0 => {
                 let number = reader.u64()?;
                 if number == 0 {
-                    return Err("files: account zero is not an actor".into());
+                    return Err("account zero is not an actor".into());
                 }
                 Ok(Self::Account(number))
             }
             1 => {
                 let key = reader.bytes()?;
                 if key.is_empty() {
-                    return Err("files: actor key is empty".into());
+                    return Err("actor key is empty".into());
                 }
                 Ok(Self::Key(key))
             }
             2 => {
                 let module = reader.string()?;
                 if module.is_empty() {
-                    return Err("files: actor module is empty".into());
+                    return Err("actor module is empty".into());
                 }
                 Ok(Self::Module(module))
             }
             3 => Ok(Self::System),
-            _ => Err("files: invalid actor tag".into()),
+            _ => Err("invalid actor tag".into()),
         }
     }
 }
@@ -100,17 +100,17 @@ impl Authority {
     pub(crate) fn validate(&self) -> Result<(), String> {
         let actor = self.actor();
         match actor {
-            Actor::Account(0) => Err("files: account zero is not an actor".into()),
+            Actor::Account(0) => Err("account zero is not an actor".into()),
             Actor::Account(_) | Actor::System => Ok(()),
             Actor::Key(key) => {
                 if key.is_empty() {
-                    return Err("files: actor key is empty".into());
+                    return Err("actor key is empty".into());
                 }
                 Ok(())
             }
             Actor::Module(module) => {
                 if module.is_empty() {
-                    return Err("files: actor module is empty".into());
+                    return Err("actor module is empty".into());
                 }
                 Ok(())
             }

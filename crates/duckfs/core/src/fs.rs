@@ -345,7 +345,7 @@ impl<S: ObjectStore> Fs<S> {
         let next_revision = before
             .source_revision
             .checked_add(1)
-            .ok_or_else(|| "files: source revision exhausted".to_string())?;
+            .ok_or_else(|| "source revision exhausted".to_string())?;
         match operation(self) {
             Ok(output) => {
                 let pending = self.pending.as_mut().expect("require_pending set it");
@@ -485,10 +485,10 @@ impl<S: ObjectStore> Fs<S> {
 
         // A refused frame restores the pre-operation refs in `transact`.
         if bytes.is_empty() {
-            return Err("files: chunk must not be empty".into());
+            return Err("chunk must not be empty".into());
         }
         if bytes.len() as u64 > CHUNK_SIZE {
-            return Err("files: chunk exceeds CHUNK_SIZE".into());
+            return Err("chunk exceeds CHUNK_SIZE".into());
         }
 
         let digest = object_id(Kind::Chunk, bytes);
@@ -518,7 +518,7 @@ impl<S: ObjectStore> Fs<S> {
         // a joiner. the byte quota does NOT bound the count (distinct tiny chunks
         // cost almost no quota), so the count needs its own cap here.
         if pending.refs.staging.len() >= entry_cap {
-            return Err("files: staging table is full".into());
+            return Err("staging table is full".into());
         }
 
         // per-owner caps over the PENDING staging view (same-block stages count):
@@ -536,10 +536,10 @@ impl<S: ObjectStore> Fs<S> {
         // 4096 × 1 MiB > the byte quota, so an honest large upload trips the quota
         // first; this bites only a tiny-chunk flood.
         if owner_entries >= entry_cap_per_owner {
-            return Err("files: staging entry quota exceeded".into());
+            return Err("staging entry quota exceeded".into());
         }
         if used.saturating_add(len) > quota {
-            return Err("files: staging quota exceeded".into());
+            return Err("staging quota exceeded".into());
         }
         refuse_refs_growth(
             &pending.refs,
@@ -639,8 +639,7 @@ impl<S: ObjectStore> Fs<S> {
         path: String,
     ) -> Result<String, String> {
         let segments = canonical(&path)?;
-        let id =
-            from_hex_32(&snapshot).ok_or_else(|| "files: snapshot not resolvable".to_string())?;
+        let id = from_hex_32(&snapshot).ok_or_else(|| "snapshot not resolvable".to_string())?;
         let pending = self.pending.as_ref().expect("transact sets pending");
         let budget = ReadBudget::new(&pending.object_ids, self.object_read_cap);
         let store = Store {
@@ -649,7 +648,7 @@ impl<S: ObjectStore> Fs<S> {
             budget: Some(&budget),
         };
         if !refs_contains_snapshot(&pending.refs, &store, &id)? {
-            return Err("files: snapshot not resolvable".into());
+            return Err("snapshot not resolvable".into());
         }
         let source_root = snapshot_root_tree(&store, &id)?;
         let mut objects = Vec::new();
@@ -657,7 +656,7 @@ impl<S: ObjectStore> Fs<S> {
             source_root
         } else {
             let entry = entry_at(&store, Some(source_root), &segments)?
-                .ok_or_else(|| "files: projection path not found".to_string())?;
+                .ok_or_else(|| "projection path not found".to_string())?;
             let mut edit = TreeEdit::load(&store, None);
             edit.put(&store, &segments, entry)?;
             edit.build(&mut objects)?
@@ -698,7 +697,7 @@ impl<S: ObjectStore> Fs<S> {
         replacement: Option<RetentionReference>,
     ) -> Result<(), String> {
         let Authority::Module(module) = authority else {
-            return Err("files: retention mutation is module-origin only".into());
+            return Err("retention mutation is module-origin only".into());
         };
         let pending = self.pending.as_ref().expect("transact sets pending");
         let budget = ReadBudget::new(&pending.object_ids, self.object_read_cap);
@@ -710,7 +709,7 @@ impl<S: ObjectStore> Fs<S> {
         if let Some(reference) = &replacement {
             let id = crate::retention::snapshot_id(&reference.snapshot)?;
             if !refs_contains_snapshot(&pending.refs, &store, &id)? {
-                return Err("files: retention snapshot not resolvable".into());
+                return Err("retention snapshot not resolvable".into());
             }
         }
         let built = crate::retention::compare_exchange(
@@ -754,16 +753,16 @@ impl<S: ObjectStore> Fs<S> {
 
         // validate fully before the single mutation (all pre-checks).
         if name.is_empty() {
-            return Err("files: pin name must not be empty".into());
+            return Err("pin name must not be empty".into());
         }
         if name.len() > MAX_PIN_NAME_BYTES {
-            return Err("files: pin name exceeds the byte cap".into());
+            return Err("pin name exceeds the byte cap".into());
         }
         if pending.refs.pins.len() >= MAX_PINS {
-            return Err("files: pin table is full".into());
+            return Err("pin table is full".into());
         }
         if pending.refs.pins.contains_key(&name) {
-            return Err("files: pin name already exists".into());
+            return Err("pin name already exists".into());
         }
         // per-owner share of the global table (mirrors putblob's staging-entry
         // cap): without it one owner fills MAX_PINS and every other member's pin
@@ -776,13 +775,12 @@ impl<S: ObjectStore> Fs<S> {
             .filter(|pin| authority.controls(&pin.owner))
             .count();
         if owner_pins >= MAX_PINS_PER_OWNER {
-            return Err("files: pin quota exceeded".into());
+            return Err("pin quota exceeded".into());
         }
         // The id must hex-parse AND resolve in the PENDING view (head, window,
         // public pin, or protected reference). A gc'd / unknown id is unpinnable — naming an
         // unreachable snapshot cannot revive it.
-        let id =
-            from_hex_32(&snapshot).ok_or_else(|| "files: snapshot not resolvable".to_string())?;
+        let id = from_hex_32(&snapshot).ok_or_else(|| "snapshot not resolvable".to_string())?;
         let budget = ReadBudget::new(&pending.object_ids, self.object_read_cap);
         let store = Store {
             store: &self.store,
@@ -790,7 +788,7 @@ impl<S: ObjectStore> Fs<S> {
             budget: Some(&budget),
         };
         if !refs_contains_snapshot(&pending.refs, &store, &id)? {
-            return Err("files: snapshot not resolvable".into());
+            return Err("snapshot not resolvable".into());
         }
         refuse_refs_growth(
             &pending.refs,
@@ -819,7 +817,7 @@ impl<S: ObjectStore> Fs<S> {
 
         let removed = pending.refs.pins.remove(&name);
         if removed.is_none() {
-            return Err("files: pin not found".into());
+            return Err("pin not found".into());
         }
         Ok(())
     }
@@ -841,21 +839,21 @@ impl<S: ObjectStore> Fs<S> {
 
         watch_origin_gate(authority, &module_id)?;
         if module_id.is_empty() {
-            return Err("files: watch module id must not be empty".into());
+            return Err("watch module id must not be empty".into());
         }
         if module_id.len() > MAX_WATCH_MODULE_ID_BYTES {
-            return Err("files: watch module id exceeds the byte cap".into());
+            return Err("watch module id exceeds the byte cap".into());
         }
         // canonicalize the prefix so registration and the commit fan-out key on the
         // SAME bytes, and so matching is segment-boundary (not substring): a watch on
         // "/shared" must fire for "/shared/x" but NOT for "/sharedsecret/x".
         let prefix = canonical_watch_prefix(&prefix)?;
         if pending.refs.watches.len() >= MAX_WATCHES {
-            return Err("files: watch table is full".into());
+            return Err("watch table is full".into());
         }
         let key = (prefix, module_id);
         if pending.refs.watches.contains(&key) {
-            return Err("files: watch already registered".into());
+            return Err("watch already registered".into());
         }
         refuse_refs_growth(
             &pending.refs,
@@ -886,7 +884,7 @@ impl<S: ObjectStore> Fs<S> {
         let prefix = canonical_watch_prefix(&prefix)?;
         let key = (prefix, module_id);
         if !pending.refs.watches.remove(&key) {
-            return Err("files: watch not found".into());
+            return Err("watch not found".into());
         }
         Ok(())
     }
@@ -992,7 +990,7 @@ impl<S: ObjectStore> Fs<S> {
         match req {
             FilesSyncReq::GetObjects { ids } => {
                 if ids.len() > MAX_SYNC_IDS {
-                    return Err("files: too many ids".into());
+                    return Err("too many ids".into());
                 }
                 let mut out = Vec::with_capacity(ids.len());
                 // the reply BYTE budget (see [`MAX_SYNC_REPLY_BYTES`]): a full
@@ -1011,8 +1009,7 @@ impl<S: ObjectStore> Fs<S> {
                     // one bad id rejects the batch — the same all-or-nothing
                     // strictness the object/refs codecs use, so a caller can never
                     // silently drop a mistyped id as a phantom "absent".
-                    let id =
-                        from_hex_32(hex).ok_or_else(|| "files: sync id is not hex".to_string())?;
+                    let id = from_hex_32(hex).ok_or_else(|| "sync id is not hex".to_string())?;
                     // re-render the id so the reply is canonical lowercase hex
                     // regardless of how the request framed it.
                     let absent = SyncObject {
@@ -1055,7 +1052,7 @@ impl<S: ObjectStore> Fs<S> {
                 // is (the p2p sender asserts on the cap; it must not see it).
                 let fits_budget = b64.len() <= MAX_SYNC_REPLY_BYTES;
                 if !fits_budget {
-                    return Err("files: refs image exceeds the sync reply budget".into());
+                    return Err("refs image exceeds the sync reply budget".into());
                 }
                 Ok(FilesSyncResp::Refs { b64 })
             }
@@ -1072,7 +1069,7 @@ impl<S: ObjectStore> Fs<S> {
     pub fn install_refs(&mut self, bytes: &[u8], expected_root: [u8; 32]) -> Result<(), String> {
         let refs = decode_refs(bytes)?;
         if root_bytes(&refs) != expected_root {
-            return Err("files: refs image does not match the expected root".into());
+            return Err("refs image does not match the expected root".into());
         }
         self.refs = refs;
         self.pending = None;
@@ -1119,14 +1116,14 @@ impl<S: ObjectStore> Fs<S> {
     /// here (the chunks may not have arrived yet) — the read side closes that hole
     /// per-chunk. pure: the caller (glue) fsyncs the batch for durability.
     pub fn ingest_object(&mut self, id: &ObjectId, kind: u8, body: &[u8]) -> Result<(), String> {
-        let kind = Kind::from_u8(kind).ok_or_else(|| "files: ingest unknown kind".to_string())?;
+        let kind = Kind::from_u8(kind).ok_or_else(|| "ingest unknown kind".to_string())?;
         if object_id(kind, body) != *id {
-            return Err("files: object id mismatch".into());
+            return Err("object id mismatch".into());
         }
         if kind == Kind::File {
             let file = FileObj::decode(body)?;
             verify_file_shape(file.size, file.chunks.len())
-                .map_err(|_| "files: ingest file object size/chunk shape invalid".to_string())?;
+                .map_err(|_| "ingest file object size/chunk shape invalid".to_string())?;
         }
         self.store.put(kind, body)?;
         Ok(())
@@ -1220,13 +1217,13 @@ fn commit_apply(
 
     // step 1: message + change-count bounds.
     if message.len() > MAX_MESSAGE_BYTES {
-        return Err("files: commit message exceeds the byte cap".into());
+        return Err("commit message exceeds the byte cap".into());
     }
     if changes.is_empty() {
-        return Err("files: commit must carry at least one change".into());
+        return Err("commit must carry at least one change".into());
     }
     if changes.len() > MAX_CHANGES_PER_COMMIT {
-        return Err("files: commit exceeds the change cap".into());
+        return Err("commit exceeds the change cap".into());
     }
 
     // step 2: resolve base -> its root tree. None = the empty tree (first commit /
@@ -1235,10 +1232,9 @@ fn commit_apply(
     let base_root: Option<ObjectId> = match &base {
         None => None,
         Some(hex) => {
-            let id = from_hex_32(hex)
-                .ok_or_else(|| "files: base snapshot not resolvable".to_string())?;
+            let id = from_hex_32(hex).ok_or_else(|| "base snapshot not resolvable".to_string())?;
             if !refs_contains_snapshot(&refs, store, &id)? {
-                return Err("files: base snapshot not resolvable".into());
+                return Err("base snapshot not resolvable".into());
             }
             Some(snapshot_root_tree(store, &id)?)
         }
@@ -1285,12 +1281,12 @@ fn commit_apply(
                         // step 5: strict base64, budget-summed.
                         let bytes = STANDARD
                             .decode(b64.as_bytes())
-                            .map_err(|_| "files: inline content is not valid base64".to_string())?;
+                            .map_err(|_| "inline content is not valid base64".to_string())?;
                         inline_bytes = inline_bytes
                             .checked_add(bytes.len())
-                            .ok_or_else(|| "files: inline commit budget overflows".to_string())?;
+                            .ok_or_else(|| "inline commit budget overflows".to_string())?;
                         if inline_bytes > MAX_INLINE_COMMIT_BYTES {
-                            return Err("files: inline commit budget exceeded".into());
+                            return Err("inline commit budget exceeded".into());
                         }
                         let chunk_ids =
                             chunk_bytes(&bytes, store, pending_ids, &mut objects, &mut staged_ids)?;
@@ -1370,7 +1366,7 @@ fn commit_apply(
                 let joined = join_segs(&segs);
                 dedup(&mut seen, &joined)?;
                 if target.len() > MAX_SYMLINK_TARGET_BYTES {
-                    return Err("files: symlink target exceeds the byte cap".into());
+                    return Err("symlink target exceeds the byte cap".into());
                 }
                 // one chunk holds the target bytes; the FileObj points at it with
                 // the symlink's entry kind and size = target length.
@@ -1427,7 +1423,7 @@ fn commit_apply(
     for (size, ids) in &chunks_to_check {
         for (index, id) in ids.iter().enumerate() {
             let got = chunk_stat(id, &refs, pending_ids, &staged_ids)?
-                .ok_or_else(|| "files: chunk not available".to_string())?;
+                .ok_or_else(|| "chunk not available".to_string())?;
             verify_chunk_len_at(*size, ids.len(), index, got)?;
         }
     }
@@ -1437,7 +1433,7 @@ fn commit_apply(
     // concurrent change moved it since base — reject the whole commit.
     for (joined, segs) in &touched {
         if entry_at(store, base_root, segs)? != entry_at(store, effective_root, segs)? {
-            return Err(format!("files: conflict: {joined} changed since base"));
+            return Err(format!("conflict: {joined} changed since base"));
         }
     }
 
@@ -1549,7 +1545,7 @@ fn chunk_stat(
     }
     if let Some((kind, len)) = pending_ids.get(id).or_else(|| staged_ids.get(id)) {
         if *kind != Kind::Chunk {
-            return Err("files: referenced digest is not a chunk".into());
+            return Err("referenced digest is not a chunk".into());
         }
         return Ok(Some(*len));
     }
@@ -1583,7 +1579,7 @@ fn refuse_refs_growth(refs: &Refs, entry_len: usize, window_cap: usize) -> Resul
     if fits_image {
         return Ok(());
     }
-    Err("files: refs image is full".into())
+    Err("refs image is full".into())
 }
 
 /// Bytes the commit/projection/retention paths can still add without a growing
@@ -1603,12 +1599,12 @@ fn watch_origin_gate(authority: &Authority, module_id: &str) -> Result<(), Strin
         Authority::System => Ok(()),
         Authority::Module(actor) => {
             if actor != module_id {
-                return Err("files: a module may only watch for itself".into());
+                return Err("a module may only watch for itself".into());
             }
             Ok(())
         }
         Authority::External { .. } | Authority::Program(_) => {
-            Err("files: watch registration is module-origin only".into())
+            Err("watch registration is module-origin only".into())
         }
     }
 }
@@ -1644,7 +1640,7 @@ fn watch_matches(prefix: &str, path: &str) -> bool {
 /// (order-independence for CAS and apply). Mv touches two paths.
 fn dedup(seen: &mut BTreeSet<String>, joined: &str) -> Result<(), String> {
     if !seen.insert(joined.to_string()) {
-        return Err("files: duplicate path in commit".into());
+        return Err("duplicate path in commit".into());
     }
     Ok(())
 }
@@ -1653,14 +1649,14 @@ fn dedup(seen: &mut BTreeSet<String>, joined: &str) -> Result<(), String> {
 /// (the objects codec would also reject at decode, but we fail early and loudly).
 fn validate_meta(meta: &BTreeMap<String, String>) -> Result<(), String> {
     if meta.len() > MAX_META_ENTRIES {
-        return Err("files: commit meta entry count over cap".into());
+        return Err("commit meta entry count over cap".into());
     }
     for (key, value) in meta {
         if key.len() > MAX_META_KEY_BYTES {
-            return Err("files: commit meta key over cap".into());
+            return Err("commit meta key over cap".into());
         }
         if value.len() > MAX_META_VALUE_BYTES {
-            return Err("files: commit meta value over cap".into());
+            return Err("commit meta value over cap".into());
         }
     }
     Ok(())
@@ -1672,16 +1668,14 @@ fn validate_meta(meta: &BTreeMap<String, String>) -> Result<(), String> {
 /// `(n-1)*CHUNK_SIZE < size <= n*CHUNK_SIZE`.
 fn validate_chunks(size: u64, chunks: &[String]) -> Result<Vec<ObjectId>, String> {
     if chunks.len() > MAX_CHUNKS_PER_FILE {
-        return Err("files: file chunk count over cap".into());
+        return Err("file chunk count over cap".into());
     }
     // the size/chunk-count invariant is shared with sync ingest, so it lives in
     // one place ([`verify_file_shape`]) rather than being duplicated here.
     verify_file_shape(size, chunks.len())?;
     chunks
         .iter()
-        .map(|hex| {
-            from_hex_32(hex).ok_or_else(|| "files: chunk digest is not valid hex".to_string())
-        })
+        .map(|hex| from_hex_32(hex).ok_or_else(|| "chunk digest is not valid hex".to_string()))
         .collect()
 }
 
@@ -2156,7 +2150,7 @@ mod refs_image_budget {
         }
         assert_eq!(
             refused.as_deref(),
-            Some("files: refs image is full"),
+            Some("refs image is full"),
             "the byte cap trips before the watch count cap"
         );
         if let Some((refs, _, _)) = fs.commit_block() {

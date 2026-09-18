@@ -81,7 +81,7 @@ impl<'a> ReadBudget<'a> {
     fn check(&self) -> Result<(), String> {
         let charged = self.gets.borrow().len() + self.stats.borrow().len();
         if charged > self.cap {
-            return Err(format!("files: object-read budget exceeded ({})", self.cap));
+            return Err(format!("object-read budget exceeded ({})", self.cap));
         }
         Ok(())
     }
@@ -164,9 +164,9 @@ impl Store<'_> {
 pub fn snapshot_root_tree(store: &Store, snapshot: &ObjectId) -> Result<ObjectId, String> {
     let (kind, body) = store
         .get(snapshot)?
-        .ok_or_else(|| "files: snapshot object missing from store".to_string())?;
+        .ok_or_else(|| "snapshot object missing from store".to_string())?;
     if kind != Kind::Snapshot {
-        return Err("files: expected a snapshot object".into());
+        return Err("expected a snapshot object".into());
     }
     Ok(SnapshotObj::decode(&body)?.root)
 }
@@ -251,7 +251,7 @@ impl TreeEdit {
     pub fn put(&mut self, store: &Store, segs: &[String], entry: TreeEntry) -> Result<(), String> {
         let (name, dirs) = segs
             .split_last()
-            .ok_or_else(|| "files: cannot put the root itself".to_string())?;
+            .ok_or_else(|| "cannot put the root itself".to_string())?;
         let parent = navigate(&mut self.root, store, dirs, true)?;
         parent.insert(name.clone(), Node::Ref(entry));
         Ok(())
@@ -262,10 +262,10 @@ impl TreeEdit {
     pub fn mkdir(&mut self, store: &Store, segs: &[String]) -> Result<(), String> {
         let (name, dirs) = segs
             .split_last()
-            .ok_or_else(|| "files: cannot mkdir the root itself".to_string())?;
+            .ok_or_else(|| "cannot mkdir the root itself".to_string())?;
         let parent = navigate(&mut self.root, store, dirs, true)?;
         if parent.contains_key(name) {
-            return Err("files: mkdir target already exists".into());
+            return Err("mkdir target already exists".into());
         }
         parent.insert(name.clone(), Node::Dir(BTreeMap::new()));
         Ok(())
@@ -277,10 +277,10 @@ impl TreeEdit {
     pub fn rm(&mut self, store: &Store, segs: &[String]) -> Result<(), String> {
         let (name, dirs) = segs
             .split_last()
-            .ok_or_else(|| "files: cannot rm the root itself".to_string())?;
+            .ok_or_else(|| "cannot rm the root itself".to_string())?;
         let parent = navigate(&mut self.root, store, dirs, false)?;
         if parent.remove(name).is_none() {
-            return Err("files: rm target does not exist".into());
+            return Err("rm target does not exist".into());
         }
         Ok(())
     }
@@ -303,22 +303,22 @@ impl TreeEdit {
     pub fn mv(&mut self, store: &Store, from: &[String], to: &[String]) -> Result<(), String> {
         let (from_name, from_dirs) = from
             .split_last()
-            .ok_or_else(|| "files: cannot mv the root itself".to_string())?;
+            .ok_or_else(|| "cannot mv the root itself".to_string())?;
         let (to_name, to_dirs) = to
             .split_last()
-            .ok_or_else(|| "files: cannot mv onto the root itself".to_string())?;
+            .ok_or_else(|| "cannot mv onto the root itself".to_string())?;
         // a path cannot move into its own subtree (from == to, or to under from):
         // build would try to re-parent the tree under a node it just removed. this
         // also subsumes the from == to no-op (to would be present anyway).
         if to.len() >= from.len() && to[..from.len()] == *from {
-            return Err("files: cannot move a path into its own subtree".into());
+            return Err("cannot move a path into its own subtree".into());
         }
         // validate BEFORE mutating so a rejected mv leaves the overlay untouched:
         // 1. source must exist under its (already-existing) parent.
         {
             let parent = navigate(&mut self.root, store, from_dirs, false)?;
             if !parent.contains_key(from_name) {
-                return Err("files: mv source does not exist".into());
+                return Err("mv source does not exist".into());
             }
         }
         // 2. destination parent must already exist as a dir (no auto-create), and
@@ -326,7 +326,7 @@ impl TreeEdit {
         {
             let parent = navigate(&mut self.root, store, to_dirs, false)?;
             if parent.contains_key(to_name) {
-                return Err("files: mv destination already exists".into());
+                return Err("mv destination already exists".into());
             }
         }
         // 3. lift the node out of its source parent and drop it under the dest
@@ -379,9 +379,9 @@ impl TreeEdit {
 fn fetch_tree(store: &Store, id: &ObjectId) -> Result<BTreeMap<String, TreeEntry>, String> {
     let (kind, body) = store
         .get(id)?
-        .ok_or_else(|| "files: tree object missing from store".to_string())?;
+        .ok_or_else(|| "tree object missing from store".to_string())?;
     if kind != Kind::Tree {
-        return Err("files: expected a tree object".into());
+        return Err("expected a tree object".into());
     }
     Ok(TreeObj::decode(&body)?.entries)
 }
@@ -400,7 +400,7 @@ fn load_children(store: &Store, id: &ObjectId) -> Result<BTreeMap<String, Node>,
 fn materialize(store: &Store, node: &mut Node) -> Result<(), String> {
     if let Node::Ref(entry) = node {
         if entry.kind != EntryKind::Dir {
-            return Err("files: a file or symlink is in the way of a directory path".into());
+            return Err("a file or symlink is in the way of a directory path".into());
         }
         let children = load_children(store, &entry.id)?;
         *node = Node::Dir(children);
@@ -430,7 +430,7 @@ fn navigate<'e>(
         };
         if !map.contains_key(seg) {
             if !create {
-                return Err("files: a directory on the path does not exist".into());
+                return Err("a directory on the path does not exist".into());
             }
             map.insert(seg.clone(), Node::Dir(BTreeMap::new()));
         }
@@ -502,7 +502,7 @@ fn build_dir(
         entries.insert(name, entry);
     }
     if entries.len() > MAX_DIR_ENTRIES {
-        return Err("files: directory exceeds the maximum entry count".into());
+        return Err("directory exceeds the maximum entry count".into());
     }
     let size = entries.len() as u64;
     let body = TreeObj { entries }.encode();
@@ -527,7 +527,7 @@ fn dir_entry_readonly(node: &Node) -> Result<TreeEntry, String> {
                 entries.insert(name.clone(), dir_entry_readonly(child)?);
             }
             if entries.len() > MAX_DIR_ENTRIES {
-                return Err("files: directory exceeds the maximum entry count".into());
+                return Err("directory exceeds the maximum entry count".into());
             }
             let size = entries.len() as u64;
             let body = TreeObj { entries }.encode();

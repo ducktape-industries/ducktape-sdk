@@ -13,9 +13,9 @@
 //! types. shell-side effects (rpc loads, iced styling, editors) stay in the
 //! shell.
 
-use sha2::{Digest, Sha256};
-pub use chat_message::parse_message;
 use chat_message::inline_spans;
+pub use chat_message::parse_message;
+use sha2::{Digest, Sha256};
 
 use crate::index::{self, MsgRow};
 use crate::{Block, ChatAssigned, ChatMsg, Mark, Party, PostPolicy, Span, decode_msg};
@@ -1921,7 +1921,7 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
     if channel_id.contains('/') {
         return Err(Error::module(
             "channel_id_shape",
-            "chat: channel ids may not contain '/'",
+            "channel ids may not contain '/'",
         ));
     }
     match party {
@@ -1929,7 +1929,7 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
             if channel_id.contains(':') {
                 return Err(Error::module(
                     "channel_id_namespace",
-                    "chat: channel ids containing ':' are reserved for modules",
+                    "channel ids containing ':' are reserved for modules",
                 ));
             }
             Ok(())
@@ -1938,9 +1938,7 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
             if !channel_id.starts_with(&format!("{module}:")) {
                 return Err(Error::module(
                     "channel_id_namespace",
-                    format!(
-                        "chat: module '{module}' may only create channel ids prefixed '{module}:'"
-                    ),
+                    format!("module '{module}' may only create channel ids prefixed '{module}:'"),
                 ));
             }
             Ok(())

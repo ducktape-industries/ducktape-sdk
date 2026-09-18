@@ -52,9 +52,7 @@ pub struct RouteManifest {
 
 pub fn validate_manifest(manifest: &RouteManifest) -> Result<(), String> {
     if manifest.files.is_empty() || manifest.files.len() > MAX_MANIFEST_FILES {
-        return Err(format!(
-            "gateway manifest: needs 1..={MAX_MANIFEST_FILES} files"
-        ));
+        return Err(format!("manifest: needs 1..={MAX_MANIFEST_FILES} files"));
     }
     if let Some(path) = &manifest.default_path {
         validate_content_path(path)?;
@@ -65,26 +63,26 @@ pub fn validate_manifest(manifest: &RouteManifest) -> Result<(), String> {
     for file in &manifest.files {
         validate_content_path(&file.path)?;
         if previous.is_some_and(|old| old >= file.path.as_str()) {
-            return Err("gateway manifest: files must be strictly path-sorted".into());
+            return Err("manifest: files must be strictly path-sorted".into());
         }
         previous = Some(&file.path);
         if file.mime.is_empty() || file.mime.len() > MAX_MIME_BYTES || !file.mime.is_ascii() {
             return Err(format!(
-                "gateway manifest: mime must be 1..={MAX_MIME_BYTES} ascii bytes"
+                "manifest: mime must be 1..={MAX_MIME_BYTES} ascii bytes"
             ));
         }
         if file.size > MAX_FILE_BYTES {
             return Err(format!(
-                "gateway manifest: file {} exceeds {MAX_FILE_BYTES} bytes",
+                "manifest: file {} exceeds {MAX_FILE_BYTES} bytes",
                 file.path
             ));
         }
         total = total
             .checked_add(file.size)
-            .ok_or_else(|| "gateway manifest: total content size overflows u64".to_string())?;
+            .ok_or_else(|| "manifest: total content size overflows u64".to_string())?;
         if !is_canonical_sha256(&file.sha256) {
             return Err(format!(
-                "gateway manifest: file {} has a non-canonical SHA-256",
+                "manifest: file {} has a non-canonical SHA-256",
                 file.path
             ));
         }
@@ -94,11 +92,11 @@ pub fn validate_manifest(manifest: &RouteManifest) -> Result<(), String> {
     }
     if total > MAX_SITE_BYTES {
         return Err(format!(
-            "gateway manifest: content exceeds {MAX_SITE_BYTES} total bytes"
+            "manifest: content exceeds {MAX_SITE_BYTES} total bytes"
         ));
     }
     if !default_exists {
-        return Err("gateway manifest: default_path must name one declared file".into());
+        return Err("manifest: default_path must name one declared file".into());
     }
     Ok(())
 }
@@ -111,16 +109,16 @@ pub fn manifest_file_for_path<'a>(
     path_and_query: &str,
 ) -> Result<&'a ContentFile, String> {
     if path_and_query.contains('?') {
-        return Err("gateway content: query strings are not supported".into());
+        return Err("content: query strings are not supported".into());
     }
     let path = match path_and_query {
         "/" => manifest
             .default_path
             .as_deref()
-            .ok_or_else(|| "gateway content: no default path".to_string())?,
+            .ok_or_else(|| "content: no default path".to_string())?,
         path => path
             .strip_prefix('/')
-            .ok_or_else(|| "gateway content: path is not origin-form".to_string())?,
+            .ok_or_else(|| "content: path is not origin-form".to_string())?,
     };
     validate_content_path(path)?;
     manifest
@@ -128,13 +126,13 @@ pub fn manifest_file_for_path<'a>(
         .binary_search_by(|file| file.path.as_str().cmp(path))
         .ok()
         .map(|index| &manifest.files[index])
-        .ok_or_else(|| "gateway content: file is not declared".to_string())
+        .ok_or_else(|| "content: file is not declared".to_string())
 }
 
 pub fn validate_content_path(path: &str) -> Result<(), String> {
     if path.is_empty() || path.len() > MAX_CONTENT_PATH_BYTES || path.starts_with('/') {
         return Err(format!(
-            "gateway content: path must be a 1..={MAX_CONTENT_PATH_BYTES}-byte relative path"
+            "content: path must be a 1..={MAX_CONTENT_PATH_BYTES}-byte relative path"
         ));
     }
     for segment in path.split('/') {
@@ -146,7 +144,7 @@ pub fn validate_content_path(path: &str) -> Result<(), String> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
-            return Err(format!("gateway content: non-canonical content path: {path:?}"));
+            return Err(format!("content: non-canonical content path: {path:?}"));
         }
     }
     Ok(())
@@ -198,9 +196,11 @@ mod tests {
 
         let mut orphan_default = manifest();
         orphan_default.default_path = Some("nope.html".into());
-        assert!(validate_manifest(&orphan_default)
-            .unwrap_err()
-            .contains("default_path"));
+        assert!(
+            validate_manifest(&orphan_default)
+                .unwrap_err()
+                .contains("default_path")
+        );
     }
 
     #[test]

@@ -58,12 +58,12 @@ pub(crate) fn decode_record(body: &[u8]) -> Result<Record, String> {
     let file = FileObj::decode(body)?;
     let valid_shape = file.size == 0 && file.chunks.is_empty() && file.meta.len() == 2;
     if !valid_shape {
-        return Err("files: invalid retention record shape".into());
+        return Err("invalid retention record shape".into());
     }
     let snapshot = file
         .meta
         .get("snapshot")
-        .ok_or_else(|| "files: retention record has no snapshot".to_string())?;
+        .ok_or_else(|| "retention record has no snapshot".to_string())?;
     let id = snapshot_id(snapshot)?;
     if let Some(revision) = file.meta.get("revision") {
         return Ok(Record::Reference(RetentionReference {
@@ -74,7 +74,7 @@ pub(crate) fn decode_record(body: &[u8]) -> Result<Record, String> {
     let count = file
         .meta
         .get("count")
-        .ok_or_else(|| "files: retention record has no count".to_string())?;
+        .ok_or_else(|| "retention record has no count".to_string())?;
     Ok(Record::Membership {
         snapshot: id,
         count: positive_number(count)?,
@@ -84,19 +84,18 @@ pub(crate) fn decode_record(body: &[u8]) -> Result<Record, String> {
 fn positive_number(value: &str) -> Result<u64, String> {
     let number = value
         .parse::<u64>()
-        .map_err(|_| "files: invalid retention number".to_string())?;
+        .map_err(|_| "invalid retention number".to_string())?;
     let canonical = number != 0 && number.to_string() == value;
     if !canonical {
-        return Err("files: invalid retention number".into());
+        return Err("invalid retention number".into());
     }
     Ok(number)
 }
 
 pub(crate) fn snapshot_id(snapshot: &str) -> Result<ObjectId, String> {
-    let id =
-        from_hex_32(snapshot).ok_or_else(|| "files: invalid retention snapshot".to_string())?;
+    let id = from_hex_32(snapshot).ok_or_else(|| "invalid retention snapshot".to_string())?;
     if to_hex(&id) != snapshot {
-        return Err("files: retention snapshot must be canonical hex".into());
+        return Err("retention snapshot must be canonical hex".into());
     }
     Ok(id)
 }
@@ -105,7 +104,7 @@ fn validate_name(module: &str, key: &str) -> Result<(), String> {
     let valid_module = !module.is_empty() && module.len() <= MAX_WATCH_MODULE_ID_BYTES;
     let valid_key = !key.is_empty() && key.len() <= MAX_PIN_NAME_BYTES;
     if !valid_module || !valid_key {
-        return Err("files: invalid retention module or key".into());
+        return Err("invalid retention module or key".into());
     }
     Ok(())
 }
@@ -137,13 +136,13 @@ fn get_record(
         return Ok(None);
     };
     if entry.kind != EntryKind::File {
-        return Err("files: retention record is not a file".into());
+        return Err("retention record is not a file".into());
     }
     let Some((kind, body)) = store.get(&entry.id)? else {
-        return Err("files: retention record missing".into());
+        return Err("retention record missing".into());
     };
     if kind != Kind::File {
-        return Err("files: retention record kind mismatch".into());
+        return Err("retention record kind mismatch".into());
     }
     decode_record(&body).map(Some)
 }
@@ -158,7 +157,7 @@ pub(crate) fn get(
     match get_record(store, root, &reference_path(module, key))? {
         None => Ok(None),
         Some(Record::Reference(reference)) => Ok(Some(reference)),
-        Some(Record::Membership { .. }) => Err("files: invalid retention reference edge".into()),
+        Some(Record::Membership { .. }) => Err("invalid retention reference edge".into()),
     }
 }
 
@@ -167,11 +166,11 @@ fn count(store: &Store, root: Option<ObjectId>, id: &ObjectId) -> Result<u64, St
         None => Ok(0),
         Some(Record::Membership { snapshot, count }) => {
             if snapshot != *id {
-                return Err("files: retention membership snapshot mismatch".into());
+                return Err("retention membership snapshot mismatch".into());
             }
             Ok(count)
         }
-        Some(Record::Reference(_)) => Err("files: invalid retention membership edge".into()),
+        Some(Record::Reference(_)) => Err("invalid retention membership edge".into()),
     }
 }
 
@@ -213,7 +212,7 @@ fn remove(edit: &mut TreeEdit, store: &Store, path: &[String]) -> Result<(), Str
     for depth in (1..path.len()).rev() {
         let parent = &path[..depth];
         let Some(entry) = edit.get(store, parent)? else {
-            return Err("files: retention ancestor missing".into());
+            return Err("retention ancestor missing".into());
         };
         let empty_directory = entry.kind == EntryKind::Dir && entry.size == 0;
         if !empty_directory {
@@ -243,12 +242,12 @@ pub(crate) fn compare_exchange(
     for reference in [expected, replacement].into_iter().flatten() {
         snapshot_id(&reference.snapshot)?;
         if reference.revision == 0 {
-            return Err("files: retention revision must be nonzero".into());
+            return Err("retention revision must be nonzero".into());
         }
     }
     let current = get(store, root, module, key)?;
     if current.as_ref() != expected {
-        return Err("files: retention compare exchange mismatch".into());
+        return Err("retention compare exchange mismatch".into());
     }
     if expected == replacement {
         return Ok(Built {
@@ -260,7 +259,7 @@ pub(crate) fn compare_exchange(
         .zip(replacement)
         .is_some_and(|(old, new)| new.revision <= old.revision);
     if revision_regressed {
-        return Err("files: retention revision must advance".into());
+        return Err("retention revision must advance".into());
     }
     let mut edit = TreeEdit::load(store, root);
     let mut objects = Vec::new();
@@ -281,7 +280,7 @@ pub(crate) fn compare_exchange(
         if let Some(id) = previous {
             let remaining = count(store, root, &id)?
                 .checked_sub(1)
-                .ok_or_else(|| "files: retention membership underflow".to_string())?;
+                .ok_or_else(|| "retention membership underflow".to_string())?;
             let path = membership_path(&id);
             if remaining == 0 {
                 remove(&mut edit, store, &path)?;
@@ -301,7 +300,7 @@ pub(crate) fn compare_exchange(
         if let Some(id) = next {
             let added = count(store, root, &id)?
                 .checked_add(1)
-                .ok_or_else(|| "files: retention membership overflow".to_string())?;
+                .ok_or_else(|| "retention membership overflow".to_string())?;
             put(
                 &mut edit,
                 store,

@@ -101,12 +101,12 @@ fn retention<S: ObjectStore>(fs: &Fs<S>, module: &str, key: &str) -> Result<File
 /// client bug, not a per-id absence).
 fn has_chunks<S: ObjectStore>(fs: &Fs<S>, ids: &[String]) -> Result<FilesReply, String> {
     if ids.len() > MAX_SYNC_IDS {
-        return Err("files: too many ids".into());
+        return Err("too many ids".into());
     }
     let refs = fs.refs_view();
     let mut present = Vec::with_capacity(ids.len());
     for hex in ids {
-        let id = from_hex_32(hex).ok_or_else(|| "files: id is not hex".to_string())?;
+        let id = from_hex_32(hex).ok_or_else(|| "id is not hex".to_string())?;
         present.push(refs.staging.contains_key(&id));
     }
     Ok(FilesReply::HasChunks { present })
@@ -124,15 +124,14 @@ fn resolve_head<S: ObjectStore>(
     match snapshot {
         None => Ok(refs.head),
         Some(hex) => {
-            let id =
-                from_hex_32(hex).ok_or_else(|| "files: snapshot not resolvable".to_string())?;
+            let id = from_hex_32(hex).ok_or_else(|| "snapshot not resolvable".to_string())?;
             let store = Store {
                 store: fs.store_ref(),
                 pending: &[],
                 budget: None,
             };
             if !refs_contains_snapshot(refs, &store, &id)? {
-                return Err("files: snapshot not resolvable".into());
+                return Err("snapshot not resolvable".into());
             }
             Ok(Some(id))
         }
@@ -238,12 +237,12 @@ fn ls<S: ObjectStore>(
             None if crate::paths::is_namespace_root(&segs) => {
                 (None, format!("/{}", segs.join("/")))
             }
-            None => return Err("files: path not found".into()),
+            None => return Err("path not found".into()),
             Some(entry) => match entry.kind {
                 EntryKind::Dir => (Some(entry.id), format!("/{}", segs.join("/"))),
                 // a file or symlink has no directory listing.
                 EntryKind::File | EntryKind::Symlink => {
-                    return Err("files: not a directory".into());
+                    return Err("not a directory".into());
                 }
             },
         }
@@ -290,15 +289,15 @@ fn read<S: ObjectStore>(
     let segs = canonical(path)?;
     // the filesystem root is a directory, never a file.
     if segs.is_empty() {
-        return Err("files: not a file".into());
+        return Err("not a file".into());
     }
     let entry = match entry_at(&store, root_tree, &segs)? {
-        None => return Err("files: path not found".into()),
+        None => return Err("path not found".into()),
         Some(entry) => entry,
     };
     match entry.kind {
         EntryKind::File | EntryKind::Symlink => {}
-        EntryKind::Dir => return Err("files: not a file".into()),
+        EntryKind::Dir => return Err("not a file".into()),
     }
 
     let file = load_fileobj(&store, &entry.id)?;
@@ -453,10 +452,10 @@ fn grep<S: ObjectStore>(
     limit: u64,
 ) -> Result<FilesReply, String> {
     if pattern.is_empty() {
-        return Err("files: grep pattern must not be empty".into());
+        return Err("grep pattern must not be empty".into());
     }
     if pattern.len() > MAX_GREP_LINE_BYTES {
-        return Err("files: grep pattern exceeds the line byte cap".into());
+        return Err("grep pattern exceeds the line byte cap".into());
     }
     // resolve the snapshot HERE (not via committed_view) because a hit's evidence
     // locator needs the resolved snapshot hex, not just its root tree.
@@ -635,9 +634,9 @@ fn history<S: ObjectStore>(fs: &Fs<S>, limit: u64) -> Result<FilesReply, String>
     for id in refs.window.iter().rev().take(limit) {
         let (kind, body) = store
             .get(id)?
-            .ok_or_else(|| "files: snapshot object missing from store".to_string())?;
+            .ok_or_else(|| "snapshot object missing from store".to_string())?;
         if kind != Kind::Snapshot {
-            return Err("files: expected a snapshot object".into());
+            return Err("expected a snapshot object".into());
         }
         let snap = SnapshotObj::decode(&body)?;
         out.push(SnapshotInfo {
@@ -680,10 +679,9 @@ fn diff<S: ObjectStore>(
     };
     // Some(hex) resolves to Some(id) on success (the None branch is the no-head
     // read only), so the ok_or is defensive — an unresolvable id already errored.
-    let from_id = resolve_head(fs, Some(from))?
-        .ok_or_else(|| "files: snapshot not resolvable".to_string())?;
-    let to_id =
-        resolve_head(fs, Some(to))?.ok_or_else(|| "files: snapshot not resolvable".to_string())?;
+    let from_id =
+        resolve_head(fs, Some(from))?.ok_or_else(|| "snapshot not resolvable".to_string())?;
+    let to_id = resolve_head(fs, Some(to))?.ok_or_else(|| "snapshot not resolvable".to_string())?;
     let from_root = snapshot_root_tree(&store, &from_id)?;
     let to_root = snapshot_root_tree(&store, &to_id)?;
     let mut out = Vec::new();
@@ -800,7 +798,7 @@ fn push_diff(
         kind,
     });
     if out.len() > MAX_DIFF_ENTRIES {
-        return Err("files: diff too large, narrow the prefix".into());
+        return Err("diff too large, narrow the prefix".into());
     }
     Ok(())
 }
@@ -907,9 +905,9 @@ fn dir_entries(
     };
     let (kind, body) = store
         .get(&id)?
-        .ok_or_else(|| "files: tree object missing from store".to_string())?;
+        .ok_or_else(|| "tree object missing from store".to_string())?;
     if kind != Kind::Tree {
-        return Err("files: expected a tree object".into());
+        return Err("expected a tree object".into());
     }
     Ok(TreeObj::decode(&body)?.entries)
 }
@@ -918,9 +916,9 @@ fn dir_entries(
 fn load_fileobj(store: &Store, id: &ObjectId) -> Result<FileObj, String> {
     let (kind, body) = store
         .get(id)?
-        .ok_or_else(|| "files: file object missing from store".to_string())?;
+        .ok_or_else(|| "file object missing from store".to_string())?;
     if kind != Kind::File {
-        return Err("files: expected a file object".into());
+        return Err("expected a file object".into());
     }
     FileObj::decode(&body)
 }
@@ -940,14 +938,15 @@ fn read_range(store: &Store, file: &FileObj, offset: u64, len: u64) -> Result<Ve
     let last = ((end - 1) / CHUNK_SIZE) as usize;
     let mut out = Vec::with_capacity((end - offset) as usize);
     for index in first..=last {
-        let chunk_id = file.chunks.get(index).ok_or_else(|| {
-            "files: file references fewer chunks than its size implies".to_string()
-        })?;
+        let chunk_id = file
+            .chunks
+            .get(index)
+            .ok_or_else(|| "file references fewer chunks than its size implies".to_string())?;
         let (kind, body) = store
             .get(chunk_id)?
-            .ok_or_else(|| format!("files: chunk object missing: {}", to_hex(chunk_id)))?;
+            .ok_or_else(|| format!("chunk object missing: {}", to_hex(chunk_id)))?;
         if kind != Kind::Chunk {
-            return Err("files: expected a chunk object".into());
+            return Err("expected a chunk object".into());
         }
         // fix 2b (silent-corruption defense): content-addressing pins a chunk's
         // BYTES but not its LENGTH-in-context, so a peer-synced FileObj could name
@@ -956,7 +955,7 @@ fn read_range(store: &Store, file: &FileObj, offset: u64, len: u64) -> Result<Ve
         // and the last exactly `size - (n-1)*CHUNK_SIZE`, so a misaligned read is
         // an Err, never silently-wrong bytes.
         verify_chunk_len(file, index, body.len() as u64)
-            .map_err(|_| format!("files: chunk length inconsistent: {}", to_hex(chunk_id)))?;
+            .map_err(|_| format!("chunk length inconsistent: {}", to_hex(chunk_id)))?;
         // intersect the requested range with this chunk's byte span and copy it.
         let chunk_start = index as u64 * CHUNK_SIZE;
         let chunk_end = chunk_start + body.len() as u64;

@@ -320,7 +320,7 @@ pub fn validate_credential_name(name: &str) -> Result<(), String> {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !(len_ok && charset_ok) {
         return Err(format!(
-            "gateway: credential name must be 1-{MAX_CREDENTIAL_NAME_BYTES} chars of [a-z0-9-]"
+            "credential name must be 1-{MAX_CREDENTIAL_NAME_BYTES} chars of [a-z0-9-]"
         ));
     }
     Ok(())
@@ -328,9 +328,7 @@ pub fn validate_credential_name(name: &str) -> Result<(), String> {
 
 fn validate_chain_id(chain_id: &str) -> Result<(), String> {
     if chain_id.is_empty() || chain_id.len() > MAX_CHAIN_ID_BYTES {
-        return Err(format!(
-            "gateway: chain id must be 1..={MAX_CHAIN_ID_BYTES} bytes"
-        ));
+        return Err(format!("chain id must be 1..={MAX_CHAIN_ID_BYTES} bytes"));
     }
     Ok(())
 }
@@ -341,12 +339,10 @@ pub fn validate_set_credential_statement(statement: &SetCredentialStatement) -> 
     validate_credential_name(&record.name)?;
     validate_account_number(record.owner_account)?;
     if record.publisher_node.len() != NODE_KEY_BYTES {
-        return Err(format!(
-            "gateway: publisher node must be {NODE_KEY_BYTES} bytes"
-        ));
+        return Err(format!("publisher node must be {NODE_KEY_BYTES} bytes"));
     }
     if !record.grants.is_empty() {
-        return Err("gateway: credential registration carries no grants".into());
+        return Err("credential registration carries no grants".into());
     }
     Ok(())
 }
@@ -551,19 +547,15 @@ pub fn decode_reply(bytes: &[u8]) -> Result<GatewayReply, String> {
 
 pub fn validate_route_statement(statement: &RouteStatement) -> Result<(), String> {
     if statement.chain_id.is_empty() || statement.chain_id.len() > MAX_CHAIN_ID_BYTES {
-        return Err(format!(
-            "gateway: chain id must be 1..={MAX_CHAIN_ID_BYTES} bytes"
-        ));
+        return Err(format!("chain id must be 1..={MAX_CHAIN_ID_BYTES} bytes"));
     }
     validate_account_number(statement.account_id)?;
     statement.name.validate()?;
     if statement.publisher_node.len() != NODE_KEY_BYTES {
-        return Err(format!(
-            "gateway: publisher node must be {NODE_KEY_BYTES} bytes"
-        ));
+        return Err(format!("publisher node must be {NODE_KEY_BYTES} bytes"));
     }
     if statement.revision == 0 {
-        return Err("gateway: route revision starts at 1".into());
+        return Err("route revision starts at 1".into());
     }
     if let Some(route) = &statement.route {
         validate_route(route)?;
@@ -574,7 +566,7 @@ pub fn validate_route_statement(statement: &RouteStatement) -> Result<(), String
         > MAX_ROUTE_STATEMENT_JSON_BYTES
     {
         return Err(format!(
-            "gateway: route statement exceeds {MAX_ROUTE_STATEMENT_JSON_BYTES} bytes"
+            "route statement exceeds {MAX_ROUTE_STATEMENT_JSON_BYTES} bytes"
         ));
     }
     Ok(())
@@ -585,15 +577,11 @@ pub fn validate_route_statement(statement: &RouteStatement) -> Result<(), String
 pub fn validate_authorization(authorization: &MemberAuthorization) -> Result<(), String> {
     let signer_fits = (1..=MAX_SIGNER_KEY_BYTES).contains(&authorization.signer.len());
     if !signer_fits {
-        return Err(format!(
-            "gateway: signer must be 1..={MAX_SIGNER_KEY_BYTES} bytes"
-        ));
+        return Err(format!("signer must be 1..={MAX_SIGNER_KEY_BYTES} bytes"));
     }
     let signature_fits = (1..=MAX_SIGNATURE_BYTES).contains(&authorization.signature.len());
     if !signature_fits {
-        return Err(format!(
-            "gateway: signature must be 1..={MAX_SIGNATURE_BYTES} bytes"
-        ));
+        return Err(format!("signature must be 1..={MAX_SIGNATURE_BYTES} bytes"));
     }
     Ok(())
 }
@@ -601,7 +589,7 @@ pub fn validate_authorization(authorization: &MemberAuthorization) -> Result<(),
 pub fn validate_route_label(label: &str) -> Result<(), String> {
     if label.is_empty() || label.len() > MAX_ROUTE_LABEL_BYTES {
         return Err(format!(
-            "gateway: route label must be 1..={MAX_ROUTE_LABEL_BYTES} bytes"
+            "route label must be 1..={MAX_ROUTE_LABEL_BYTES} bytes"
         ));
     }
     if label.starts_with('-')
@@ -610,7 +598,7 @@ pub fn validate_route_label(label: &str) -> Result<(), String> {
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {
-        return Err(format!("gateway: invalid route label: {label:?}"));
+        return Err(format!("invalid route label: {label:?}"));
     }
     Ok(())
 }
@@ -618,7 +606,7 @@ pub fn validate_route_label(label: &str) -> Result<(), String> {
 /// Identity numbers accounts from 1; `0` is never an account.
 pub fn validate_account_number(number: u64) -> Result<(), String> {
     if number == 0 {
-        return Err("gateway: account number must be non-zero".into());
+        return Err("account number must be non-zero".into());
     }
     Ok(())
 }
@@ -628,7 +616,7 @@ pub fn validate_route(route: &RouteDefinition) -> Result<(), String> {
     match &route.target {
         RouteTarget::DuckFs { manifest_sha256 } => {
             if !is_canonical_sha256(manifest_sha256) {
-                return Err("gateway: manifest_sha256 must be 64 lowercase hex chars".into());
+                return Err("manifest_sha256 must be 64 lowercase hex chars".into());
             }
             // The file table is off consensus, so per-file fit against the
             // response cap is enforced at serve time (against MAX_FILE_BYTES),
@@ -641,7 +629,7 @@ pub fn validate_route(route: &RouteDefinition) -> Result<(), String> {
                 || route.policy.max_response_bytes == 0
             {
                 return Err(
-                    "gateway: content routes require GET+HEAD, no request body, no Authorization, \
+                    "content routes require GET+HEAD, no request body, no Authorization, \
                      no upgrade, and a bounded response cap"
                         .into(),
                 );
@@ -654,12 +642,12 @@ pub fn validate_route(route: &RouteDefinition) -> Result<(), String> {
 
 pub fn validate_policy(policy: &RoutePolicy) -> Result<(), String> {
     if policy.methods.is_empty() {
-        return Err("gateway: policy must allow at least one method".into());
+        return Err("policy must allow at least one method".into());
     }
     let mut previous = None;
     for method in &policy.methods {
         if previous.is_some_and(|old| old >= method) {
-            return Err("gateway: methods must be strictly sorted and unique".into());
+            return Err("methods must be strictly sorted and unique".into());
         }
         previous = Some(method);
     }
@@ -671,23 +659,21 @@ pub fn validate_policy(policy: &RoutePolicy) -> Result<(), String> {
     // accepts and nothing bounds what the transport can carry.
     let forbids_a_body = policy.max_request_bytes == Some(0);
     if policy.methods.iter().any(|method| method.permits_body()) && forbids_a_body {
-        return Err("gateway: a body-bearing method may not pin a zero request cap".into());
+        return Err("a body-bearing method may not pin a zero request cap".into());
     }
     match &policy.audience {
         RouteAudience::Owner | RouteAudience::Network => {}
         RouteAudience::Accounts { account_ids } => {
             if account_ids.is_empty() || account_ids.len() > MAX_AUDIENCE_ACCOUNTS {
                 return Err(format!(
-                    "gateway: explicit audience needs 1..={MAX_AUDIENCE_ACCOUNTS} accounts"
+                    "explicit audience needs 1..={MAX_AUDIENCE_ACCOUNTS} accounts"
                 ));
             }
             let mut previous: Option<u64> = None;
             for &account in account_ids {
                 validate_account_number(account)?;
                 if previous.is_some_and(|old| old >= account) {
-                    return Err(
-                        "gateway: audience accounts must be strictly sorted and unique".into(),
-                    );
+                    return Err("audience accounts must be strictly sorted and unique".into());
                 }
                 previous = Some(account);
             }
@@ -767,7 +753,7 @@ fn encode_policy(out: &mut Vec<u8>, policy: &RoutePolicy) {
 
 fn decode_lower_hex_32(value: &str) -> Result<[u8; 32], String> {
     if !is_canonical_sha256(value) {
-        return Err("gateway: SHA-256 must be 64 lowercase hex characters".into());
+        return Err("SHA-256 must be 64 lowercase hex characters".into());
     }
     let mut out = [0u8; 32];
     for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
