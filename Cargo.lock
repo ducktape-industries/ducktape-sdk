@@ -1030,6 +1030,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "duck-address"
+version = "0.1.0"
+
+[[package]]
 name = "duckdns"
 version = "0.1.0"
 dependencies = [
@@ -1310,6 +1314,7 @@ name = "forge-wire"
 version = "0.1.0"
 dependencies = [
  "chat-wire",
+ "duck-address",
  "sdk",
  "serde",
  "serde_json",

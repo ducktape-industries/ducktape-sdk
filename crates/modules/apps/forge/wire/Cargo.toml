@@ -10,6 +10,10 @@ version.workspace = true
 
 [dependencies]
 sdk = { workspace = true }
+# the `duck://` grammar. forge owns what `<owner>/<repo>` means, so
+# `ForgeRepoAddress` sits here; the grammar around it is one parser for
+# everyone (ducktape#2616).
+duck-address = { workspace = true }
 chat = { workspace = true }
 serde = { workspace = true }
 

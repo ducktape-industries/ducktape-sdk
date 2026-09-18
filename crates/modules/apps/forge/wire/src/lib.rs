@@ -17,7 +17,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod address;
 mod tracker_iface;
+pub use address::*;
 pub use tracker_iface::*;
 
 /// a write intent at forge.

@@ -30,6 +30,7 @@ members = [
 
     # cross-plane leaf libraries the wire surfaces are made of
     "crates/design",
+    "crates/duck-address",
     "crates/duckdns",
     "crates/duckfs/core",
     "crates/duckfs/disk",
@@ -161,6 +162,10 @@ ducktape-module-sdk = { path = "crates/module-sdk" }
 
 # ---- internal: cross-plane leaf libraries
 design = { path = "crates/design" }
+# the `duck://` address grammar: one parser for `duck://<chain>/<module>/…`,
+# shared by core's git helper and CLI, the app, and the module wire surface
+# that owns a path (forge-wire). Zero-dep on purpose.
+duck-address = { path = "crates/duck-address" }
 # the `.duck` naming library the `gateway` module embeds.
 duckdns = { path = "crates/duckdns" }
 duckfs-core = { path = "crates/duckfs/core" }
