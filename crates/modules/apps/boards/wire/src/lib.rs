@@ -1,3 +1,4 @@
+use refusal_class::{CAPACITY, CORRUPT, EXHAUSTED, INVALID_INPUT, STALE};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -302,7 +303,7 @@ pub enum Change {
     ///
     /// `base_revision` is the [`Record::revision`] the writer was editing.
     /// The reducer takes the write only while the card still stands at it,
-    /// and otherwise refuses with [`Refused`] `stale_text`, whose sentence is
+    /// and otherwise refuses with [`Refused`] [`STALE`], whose sentence is
     /// the card's current text verbatim — so the writer is handed exactly what
     /// they would have written over, while still holding their own draft.
     Text {
@@ -395,14 +396,17 @@ pub enum Reply {
 /// else, so anything wanting to tell two refusals apart had to match on prose,
 /// and the next edit to the wording broke it.
 ///
-/// `reason` names a CLASS and not a site: the two places that refuse a group
-/// name share one token, because a caller does the same thing about both.
+/// `reason` names a CLASS and not a site: a [`refusal_class`] constant, or
+/// [`TARGET_GONE`], the one class a board adds. Every static rule a change can
+/// break (a name, an id, the geometry, a run, a bond) is [`INVALID_INPUT`],
+/// because a caller does the same thing about all of them; the sentence says
+/// which rule.
 ///
-/// `sentence` is a sentence for every token but one. `stale_text` carries the
-/// card's current text VERBATIM, because the text IS what the reader of that
-/// refusal needs: the view sets it beside the draft it could not send, in its
-/// own words and its own frame. Prose wrapped around it here would be shown
-/// twice and have to be peeled back off.
+/// `sentence` is a sentence for every refusal but one. A text write refused as
+/// [`STALE`] carries the card's current text VERBATIM, because the text IS
+/// what the reader of that refusal needs: the view sets it beside the draft it
+/// could not send, in its own words and its own frame. Prose wrapped around it
+/// here would be shown twice and have to be peeled back off.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refused {
     pub reason: &'static str,
@@ -416,6 +420,11 @@ impl Refused {
         }
     }
 }
+/// The board exists but a shape the change names is not on it; a caller drops
+/// that change and keeps working the board. A domain class: `NOT_FOUND` is the
+/// board itself being gone, which a caller recovers from by leaving it.
+pub const TARGET_GONE: &str = "target_gone";
+
 /// So something that only wants to SHOW the refusal writes `{refused}` and is
 /// done — the token is for branching, not for reading.
 impl std::fmt::Display for Refused {
@@ -438,7 +447,7 @@ pub fn valid_title(title: &str) -> Result<(), Refused> {
     match named {
         true => Ok(()),
         false => Err(Refused::new(
-            "invalid_title",
+            INVALID_INPUT,
             "Use a board name between 1 and 160 bytes.",
         )),
     }
@@ -464,7 +473,7 @@ impl Board {
         let revision = self
             .revision
             .checked_add(1)
-            .ok_or_else(|| Refused::new("revision_exhausted", "Board revision exhausted."))?;
+            .ok_or_else(|| Refused::new(EXHAUSTED, "Board revision exhausted."))?;
         Ok(Self {
             title,
             revision,
@@ -482,7 +491,7 @@ impl Board {
         let bounded = !changes.is_empty() && changes.len() <= MAX_SHAPES * 2;
         if !bounded {
             return Err(Refused::new(
-                "unbounded_edit",
+                INVALID_INPUT,
                 "An edit must contain between 1 and 256 changes.",
             ));
         }
@@ -490,10 +499,10 @@ impl Board {
         for change in changes {
             next.apply(change)?;
         }
-        let bytes = serde_json::to_vec(&next)
-            .map_err(|error| Refused::new("board_unencodable", error.to_string()))?;
+        let bytes =
+            serde_json::to_vec(&next).map_err(|error| Refused::new(CORRUPT, error.to_string()))?;
         if bytes.len() > MAX_BOARD_BYTES {
-            return Err(Refused::new("board_full", "Board storage limit reached."));
+            return Err(Refused::new(CAPACITY, "Board storage limit reached."));
         }
         Ok(next)
     }
@@ -545,14 +554,14 @@ impl Board {
             && ids.iter().all(|id| self.shapes.contains_key(id));
         if !addressable {
             return Err(Refused::new(
-                "unaddressable_shapes",
+                TARGET_GONE,
                 "Stacking names each shape on the board at most once.",
             ));
         }
         let revision = self
             .revision
             .checked_add(1)
-            .ok_or_else(|| Refused::new("revision_exhausted", "Board revision exhausted."))?;
+            .ok_or_else(|| Refused::new(EXHAUSTED, "Board revision exhausted."))?;
         self.revision = revision;
         let mut stack: Vec<String> = self
             .ordered()
@@ -583,7 +592,7 @@ impl Board {
             && ids.iter().all(|id| self.shapes.contains_key(id));
         if !addressable {
             return Err(Refused::new(
-                "unaddressable_shapes",
+                TARGET_GONE,
                 "Grouping names each shape on the board at most once.",
             ));
         }
@@ -597,14 +606,14 @@ impl Board {
             && !valid_id(name)
         {
             return Err(Refused::new(
-                "invalid_group_name",
+                INVALID_INPUT,
                 "Use a group name of up to 96 id characters.",
             ));
         }
         let revision = self
             .revision
             .checked_add(1)
-            .ok_or_else(|| Refused::new("revision_exhausted", "Board revision exhausted."))?;
+            .ok_or_else(|| Refused::new(EXHAUSTED, "Board revision exhausted."))?;
         self.revision = revision;
         for id in ids {
             if let Some(record) = self.shapes.get_mut(id) {
@@ -620,7 +629,7 @@ impl Board {
         }
         if self.shapes.len() >= MAX_SHAPES {
             return Err(Refused::new(
-                "board_full",
+                CAPACITY,
                 format!("A board supports up to {MAX_SHAPES} shapes."),
             ));
         }
@@ -654,12 +663,12 @@ impl Board {
     fn text(&mut self, id: &str, text: &str, base_revision: u64) -> Result<(), Refused> {
         let Some(record) = self.shapes.get(id) else {
             return Err(Refused::new(
-                "text_target_gone",
+                TARGET_GONE,
                 "That card is no longer on the board.",
             ));
         };
         if record.revision != base_revision {
-            return Err(Refused::new("stale_text", record.shape.text.clone()));
+            return Err(Refused::new(STALE, record.shape.text.clone()));
         }
         let mut shape = record.shape.clone();
         shape.text = text.to_owned();
@@ -736,7 +745,7 @@ impl Board {
         };
         if !record.shape.kind.is_path() {
             return Err(Refused::new(
-                "not_a_connector",
+                INVALID_INPUT,
                 "Only a connector carries a run.",
             ));
         }
@@ -758,7 +767,7 @@ impl Board {
     }
     fn replace(&mut self, id: &str, shape: Option<Shape>) -> Result<(), Refused> {
         if !valid_id(id) {
-            return Err(Refused::new("invalid_id", "Invalid shape id."));
+            return Err(Refused::new(INVALID_INPUT, "Invalid shape id."));
         }
         if let Some(value) = &shape {
             self.validate_shape(id, value)?;
@@ -766,7 +775,7 @@ impl Board {
         let revision = self
             .revision
             .checked_add(1)
-            .ok_or_else(|| Refused::new("revision_exhausted", "Board revision exhausted."))?;
+            .ok_or_else(|| Refused::new(EXHAUSTED, "Board revision exhausted."))?;
         self.revision = revision;
         match shape {
             Some(shape) => {
@@ -808,7 +817,7 @@ impl Board {
         let content_valid = shape.text.len() <= MAX_TEXT && shape.color < 5;
         if !geometry_valid || !content_valid {
             return Err(Refused::new(
-                "shape_out_of_bounds",
+                INVALID_INPUT,
                 "Shape exceeds the geometry or text limits.",
             ));
         }
@@ -818,7 +827,7 @@ impl Board {
         let group_valid = shape.group.as_deref().is_none_or(valid_id);
         if !group_valid {
             return Err(Refused::new(
-                "invalid_group_name",
+                INVALID_INPUT,
                 "Use a group name of up to 96 id characters.",
             ));
         }
@@ -828,7 +837,7 @@ impl Board {
             .is_some_and(|record| record.shape.kind.is_path() != shape.kind.is_path());
         if swapping_family {
             return Err(Refused::new(
-                "family_swap",
+                INVALID_INPUT,
                 "A card and a connector are different shapes.",
             ));
         }
@@ -842,7 +851,7 @@ impl Board {
         let bare = shape.points.is_empty() && shape.from.is_none() && shape.to.is_none();
         if !bare {
             return Err(Refused::new(
-                "not_a_connector",
+                INVALID_INPUT,
                 "Only connectors carry points or endpoints.",
             ));
         }
@@ -851,7 +860,7 @@ impl Board {
     fn validate_path(&self, id: &str, shape: &Shape) -> Result<(), Refused> {
         if !(2..=MAX_POINTS).contains(&shape.points.len()) {
             return Err(Refused::new(
-                "invalid_run",
+                INVALID_INPUT,
                 format!("A connector needs between 2 and {MAX_POINTS} points."),
             ));
         }
@@ -862,19 +871,19 @@ impl Board {
             .all(|value| value.abs_diff(0) <= MAX_SIZE as u32);
         if !inside {
             return Err(Refused::new(
-                "invalid_run",
+                INVALID_INPUT,
                 "Connector points must stay inside the shape.",
             ));
         }
         let bindable = shape.kind == Kind::Arrow;
         let bound = [&shape.from, &shape.to];
         if !bindable && bound.iter().any(|end| end.is_some()) {
-            return Err(Refused::new("invalid_bond", "Only arrows bind to cards."));
+            return Err(Refused::new(INVALID_INPUT, "Only arrows bind to cards."));
         }
         let holds_one_card = held(&shape.from).is_some() && held(&shape.from) == held(&shape.to);
         if holds_one_card {
             return Err(Refused::new(
-                "invalid_bond",
+                INVALID_INPUT,
                 "An arrow connects two different cards.",
             ));
         }
@@ -887,7 +896,7 @@ impl Board {
         });
         if !endpoints_valid {
             return Err(Refused::new(
-                "invalid_bond",
+                INVALID_INPUT,
                 "An arrow binds to an existing card.",
             ));
         }
@@ -901,7 +910,7 @@ impl Board {
             .all(|share| (0..=ANCHOR_SPAN).contains(&share));
         if !anchors_valid {
             return Err(Refused::new(
-                "invalid_anchor",
+                INVALID_INPUT,
                 format!("An arrow's anchor sits between 0 and {ANCHOR_SPAN} of its card."),
             ));
         }

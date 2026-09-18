@@ -15,6 +15,12 @@
 //! two-character separator, then the sentence VERBATIM. [`decode`] splits on
 //! the FIRST separator, so a sentence that itself contains `": "` survives the
 //! round trip whole.
+//!
+//! The tokens themselves, and the rule for minting one, live in
+//! [`refusal_class`]; every constant there is re-exported here, so a module
+//! writes `sdk::refusal::STALE`.
+
+pub use refusal_class::*;
 
 /// frame a refusal as the one string the world's `rejected` carries.
 pub fn encode(reason: &str, sentence: &str) -> String {
@@ -50,6 +56,28 @@ mod tests {
         // part of one.
         assert_eq!(decode(&encode("codec", "")), Some(("codec", "")));
         assert_eq!(decode(&encode("codec", ": ")), Some(("codec", ": ")));
+    }
+
+    /// a class the framing cannot carry would fail closed at the boundary.
+    #[test]
+    fn every_class_crosses_the_frame() {
+        for token in [
+            NOT_FOUND,
+            ALREADY_EXISTS,
+            STALE,
+            WRONG_STATE,
+            INVALID_INPUT,
+            CAPACITY,
+            EXHAUSTED,
+            UNAUTHORIZED,
+            UNSUPPORTED,
+            CORRUPT,
+            UNEXPECTED_REPLY,
+            TRAP,
+            UNFRAMED_REFUSAL,
+        ] {
+            assert_eq!(decode(&encode(token, "x")), Some((token, "x")));
+        }
     }
 
     #[test]

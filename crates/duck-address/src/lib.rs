@@ -28,6 +28,8 @@
 //!
 //! See ducktape#2616 (design note v3) for why the grammar is this.
 
+use refusal_class::INVALID_INPUT;
+
 /// the scheme, spelled once.
 const SCHEME: &str = "duck://";
 
@@ -123,7 +125,7 @@ impl Address {
         lowercase(text)?;
         let rest = text.strip_prefix(SCHEME).ok_or_else(|| {
             Refused::new(
-                "scheme",
+                INVALID_INPUT,
                 format!("A ducktape address starts with `{SCHEME}`, and `{text}` does not."),
             )
         })?;
@@ -153,7 +155,7 @@ impl Address {
                 .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
             {
                 return Err(Refused::new(
-                    "path_charset",
+                    INVALID_INPUT,
                     format!(
                         "A duck:// path segment carries only [a-z0-9._-], and `{segment}` does not."
                     ),
@@ -168,7 +170,7 @@ impl Address {
         // has built cannot be read as one for a module that exists.
         if module != "forge" {
             return Err(Refused::new(
-                "module_unknown",
+                INVALID_INPUT,
                 format!("`{module}` names no ducktape module; the module segment is `forge`."),
             ));
         }
@@ -201,10 +203,11 @@ impl std::fmt::Display for Address {
 /// refusal that is only prose has to be matched by prose, and the next edit to
 /// the wording breaks the match.
 ///
-/// `reason` names a CLASS and not a site — every segment that fails forge's
-/// name rule refuses as `repo_name`, because a caller does the same thing
-/// about all of them. `sentence` is a complete sentence a developer can act
-/// on, and it quotes what was refused.
+/// `reason` names a CLASS and not a site (a [`refusal_class`] constant): every
+/// rule an address breaks, here or in a module's half of the path, refuses as
+/// [`INVALID_INPUT`], because a caller fixes the address whatever rule it
+/// broke. `sentence` is a complete sentence a developer can act on: it names
+/// the rule and quotes what was refused.
 ///
 /// `new` is public: a module validating its own half of a path (forge-wire's
 /// `ForgeRepoAddress`) refuses in the same shape rather than inventing a
@@ -235,7 +238,7 @@ impl std::fmt::Display for Refused {
 fn lowercase(text: &str) -> Result<(), Refused> {
     match text.bytes().any(|byte| byte.is_ascii_uppercase()) {
         true => Err(Refused::new(
-            "uppercase",
+            INVALID_INPUT,
             format!(
                 "A duck:// address is lowercase throughout and nothing case-folds it, but `{text}` carries an uppercase letter."
             ),
@@ -246,7 +249,7 @@ fn lowercase(text: &str) -> Result<(), Refused> {
 
 fn incomplete(text: &str) -> Refused {
     Refused::new(
-        "authority_incomplete",
+        INVALID_INPUT,
         format!(
             "A duck:// authority is the whole chain id `<label>-<salt>` (the registry's `<label>#<salt>`), with `<label>` matching [a-z0-9-] and `<salt>` exactly {SALT_HEX} lowercase hex digits; `{text}` is not one."
         ),
@@ -255,7 +258,7 @@ fn incomplete(text: &str) -> Refused {
 
 fn extra(text: &str) -> Refused {
     Refused::new(
-        "address_extra",
+        INVALID_INPUT,
         format!(
             "A duck:// address carries no credentials, port, query or fragment — the node and its credential come from the workspace registry — but `{text}` carries one."
         ),
@@ -264,7 +267,7 @@ fn extra(text: &str) -> Refused {
 
 fn empty(text: &str) -> Refused {
     Refused::new(
-        "address_empty",
+        INVALID_INPUT,
         format!(
             "A duck:// address is `duck://<label>-<salt>/<module>/…`, with an authority and at least the module segment, none of them empty; `{text}` leaves one empty."
         ),
@@ -318,55 +321,52 @@ mod tests {
         assert_eq!(registry.authority(), "dognet-b5b6ea90");
     }
 
-    fn refused(text: &str) -> &'static str {
-        Address::parse(text).expect_err("refused").reason
+    /// every refusal is one class (fix the address), so the sentence is what
+    /// tells the rules apart.
+    fn refused(text: &str) -> String {
+        sentence(Address::parse(text))
     }
 
+    fn sentence<T: std::fmt::Debug>(parsed: Result<T, Refused>) -> String {
+        let refused = parsed.expect_err("refused");
+        assert_eq!(refused.reason, INVALID_INPUT);
+        refused.sentence
+    }
+
+    const UPPERCASE: &str = "is lowercase throughout";
+    const NO_SCHEME: &str = "starts with `duck://`";
+    const EXTRA: &str = "carries no credentials, port, query or fragment";
+    const EMPTY: &str = "none of them empty";
+    const AUTHORITY: &str = "authority is the whole chain id";
+    const CHARSET: &str = "path segment carries only [a-z0-9._-]";
+    const NO_MODULE: &str = "names no ducktape module";
+
     #[test]
-    fn every_refusal_names_its_class() {
-        assert_eq!(refused("duck://Dognet-b5b6ea90/forge/a/b"), "uppercase");
-        assert_eq!(refused("duck://dognet-B5B6EA90/forge/a/b"), "uppercase");
-        assert_eq!(refused("https://dognet-b5b6ea90/forge/a/b"), "scheme");
-        assert_eq!(refused("duck:/dognet-b5b6ea90/forge/a/b"), "scheme");
-        assert_eq!(
-            refused("duck://user@dognet-b5b6ea90/forge/a"),
-            "address_extra"
-        );
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90:443/forge/a"),
-            "address_extra"
-        );
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/forge/a?rev=1"),
-            "address_extra"
-        );
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/forge/a#head"),
-            "address_extra"
-        );
-        assert_eq!(refused("duck://dognet-b5b6ea90"), "address_empty");
-        assert_eq!(refused("duck://dognet-b5b6ea90/"), "address_empty");
-        assert_eq!(refused("duck:///forge/a/b"), "address_empty");
-        assert_eq!(refused("duck://dognet-b5b6ea90/forge//b"), "address_empty");
-        assert_eq!(refused("duck://b5b6ea90/forge/a/b"), "authority_incomplete");
-        assert_eq!(refused("duck://dognet/forge/a/b"), "authority_incomplete");
-        assert_eq!(
-            refused("duck://dognet-b5b6ea9/forge/a/b"),
-            "authority_incomplete"
-        );
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90z/forge/a/b"),
-            "authority_incomplete"
-        );
-        assert_eq!(
-            refused("duck://-b5b6ea90/forge/a/b"),
-            "authority_incomplete"
-        );
-        assert_eq!(refused("duck://dognet-b5b6ea90/forge/a~b"), "path_charset");
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/gateway/a/b"),
-            "module_unknown"
-        );
+    fn every_refusal_names_the_rule_it_broke() {
+        for (text, rule) in [
+            ("duck://Dognet-b5b6ea90/forge/a/b", UPPERCASE),
+            ("duck://dognet-B5B6EA90/forge/a/b", UPPERCASE),
+            ("https://dognet-b5b6ea90/forge/a/b", NO_SCHEME),
+            ("duck:/dognet-b5b6ea90/forge/a/b", NO_SCHEME),
+            ("duck://user@dognet-b5b6ea90/forge/a", EXTRA),
+            ("duck://dognet-b5b6ea90:443/forge/a", EXTRA),
+            ("duck://dognet-b5b6ea90/forge/a?rev=1", EXTRA),
+            ("duck://dognet-b5b6ea90/forge/a#head", EXTRA),
+            ("duck://dognet-b5b6ea90", EMPTY),
+            ("duck://dognet-b5b6ea90/", EMPTY),
+            ("duck:///forge/a/b", EMPTY),
+            ("duck://dognet-b5b6ea90/forge//b", EMPTY),
+            ("duck://b5b6ea90/forge/a/b", AUTHORITY),
+            ("duck://dognet/forge/a/b", AUTHORITY),
+            ("duck://dognet-b5b6ea9/forge/a/b", AUTHORITY),
+            ("duck://dognet-b5b6ea90z/forge/a/b", AUTHORITY),
+            ("duck://-b5b6ea90/forge/a/b", AUTHORITY),
+            ("duck://dognet-b5b6ea90/forge/a~b", CHARSET),
+            ("duck://dognet-b5b6ea90/gateway/a/b", NO_MODULE),
+        ] {
+            let sentence = refused(text);
+            assert!(sentence.contains(rule), "{text}: {sentence}");
+        }
     }
 
     /// the app's page origin is a different address family (a dotted host, no
@@ -374,11 +374,9 @@ mod tests {
     /// it onto this grammar in its own unit, with no compat window.
     #[test]
     fn the_app_page_origin_is_not_this_grammar() {
-        assert_eq!(
-            refused("duck://app.alice.duck/forge/a"),
-            "authority_incomplete"
-        );
-        assert_eq!(refused("duck://page/00ff"), "authority_incomplete");
+        for text in ["duck://app.alice.duck/forge/a", "duck://page/00ff"] {
+            assert!(refused(text).contains(AUTHORITY), "{text}");
+        }
     }
 
     /// a salt-only or label-only authority was v2's local convenience; v3
@@ -386,9 +384,9 @@ mod tests {
     #[test]
     fn a_half_chain_id_is_not_an_authority() {
         for half in ["b5b6ea90", "dognet", "dognet-", "-b5b6ea90", "#b5b6ea90"] {
-            assert_eq!(
-                half.parse::<ChainId>().expect_err("refused").reason,
-                "authority_incomplete"
+            assert!(
+                sentence(half.parse::<ChainId>()).contains(AUTHORITY),
+                "{half}"
             );
         }
     }

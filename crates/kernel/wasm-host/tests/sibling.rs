@@ -51,7 +51,9 @@ impl Ctx for MockCtx {
         (target == "directory").then_some(StateRoot([0xAB; 32]))
     }
     async fn query(&self, target: &str, req: &[u8]) -> Result<Vec<u8>, Error> {
-        self.queries.borrow_mut().push((target.into(), req.to_vec()));
+        self.queries
+            .borrow_mut()
+            .push((target.into(), req.to_vec()));
         match target {
             "directory" => Ok([b"dir:", req].concat()),
             "noisy" => Ok(req.to_vec()),
@@ -210,7 +212,11 @@ async fn sibling_read_budget_is_a_deterministic_rejection() {
     let err = exec(&mut m, &mut ctx, too_many)
         .await
         .expect_err("over the budget");
-    assert!(matches!(&err, Error::Module { reason, .. } if reason == "sibling_read_budget"));
+    assert!(matches!(
+        &err,
+        Error::Module { reason, sentence }
+            if reason == sdk::refusal::CAPACITY && sentence.contains("sibling-read budget")
+    ));
     m.abort_block().await.expect("abort");
     assert_eq!(m.root(), root_before, "a rejected op stages nothing");
 }

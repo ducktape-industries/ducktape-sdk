@@ -6,7 +6,8 @@
 //! has moved on under it — with a token to branch on and the card's current
 //! text, verbatim, as the sentence.
 
-use boards_wire::{Board, Change, Shape};
+use boards_wire::{Board, Change, Shape, TARGET_GONE};
+use refusal_class::STALE;
 
 fn one_card() -> Board {
     let board = Board::new("Wall".to_owned(), "ana".to_owned()).unwrap();
@@ -48,7 +49,7 @@ fn a_write_against_a_revision_someone_else_has_passed_is_refused_with_their_word
 
     let refused = write(&board, "mine", base).unwrap_err();
 
-    assert_eq!(refused.reason, "stale_text");
+    assert_eq!(refused.reason, STALE);
     assert_eq!(
         refused.sentence, "theirs",
         "the sentence is the card's current text verbatim — no prose around it \
@@ -72,7 +73,7 @@ fn a_write_to_a_card_that_is_gone_is_refused_rather_than_swallowed() {
 
     let refused = write(&board, "mine", base).unwrap_err();
 
-    assert_eq!(refused.reason, "text_target_gone");
+    assert_eq!(refused.reason, TARGET_GONE);
 }
 
 #[test]

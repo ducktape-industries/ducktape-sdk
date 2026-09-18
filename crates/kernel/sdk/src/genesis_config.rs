@@ -24,8 +24,8 @@
 //! version). host and guests share THIS module (sdk is the one crate both
 //! sides already depend on), so the two ends can never drift.
 
-use crate::Error;
 use crate::codec::{Cursor, push_bytes, push_str};
+use crate::{Error, refusal};
 
 /// the reserved host-store key the config travels under.
 pub const CONFIG_KEY: &[u8] = b"__config";
@@ -81,7 +81,7 @@ impl TimeUnit {
             b"height" => Ok(Self::Height),
             b"millis" => Ok(Self::Millis),
             other => Err(Error::module(
-                "genesis_config",
+                refusal::INVALID_INPUT,
                 format!(
                     "genesis config time_unit is {:?}, not \"height\" or \"millis\"",
                     String::from_utf8_lossy(other)
@@ -136,7 +136,7 @@ pub fn decode_config(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Error> {
         let key = cur.string("genesis-config key")?;
         if prev.as_deref().is_some_and(|p| p >= key.as_str()) {
             return Err(Error::module(
-                "genesis_config",
+                refusal::INVALID_INPUT,
                 "genesis-config keys must be strictly increasing",
             ));
         }

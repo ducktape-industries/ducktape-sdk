@@ -21,6 +21,7 @@ members = [
     # kernel — the module contract and the pieces that run one
     "crates/kernel/sdk",
     "crates/kernel/sdk-testkit",
+    "crates/kernel/refusal-class",
     "crates/kernel/keyscheme",
     "crates/kernel/blobstore",
     "crates/kernel/index-guest",
@@ -143,6 +144,10 @@ fluent-guest = { git = "https://github.com/ducktape-industries/fluent31", rev = 
 
 # ---- internal: kernel
 sdk = { path = "crates/kernel/sdk" }
+# the refusal classes as bare `&str` constants, zero-dep: sdk re-exports them
+# as `sdk::refusal::*`; boards-wire and duck-address, which must not link sdk,
+# name them here.
+refusal-class = { path = "crates/kernel/refusal-class" }
 # dev-only shared test doubles for the sdk boundary traits (TestCtx + in-memory
 # MerkleStore). MAY ONLY appear in `[dev-dependencies]` of consumers — the
 # Module Rule (modules link only sdk + wire surfaces) is untouched.
@@ -164,7 +169,8 @@ ducktape-module-sdk = { path = "crates/module-sdk" }
 design = { path = "crates/design" }
 # the `duck://` address grammar: one parser for `duck://<chain>/<module>/…`,
 # shared by core's git helper and CLI, the app, and the module wire surface
-# that owns a path (forge-wire). Zero-dep on purpose.
+# that owns a path (forge-wire). No sdk on purpose: its one dep is the
+# zero-dep `refusal-class`.
 duck-address = { path = "crates/duck-address" }
 # the `.duck` naming library the `gateway` module embeds.
 duckdns = { path = "crates/duckdns" }

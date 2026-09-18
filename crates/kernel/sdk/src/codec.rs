@@ -9,7 +9,7 @@
 //! the bytes could not back. modules keep owning their layouts; only the
 //! primitives are shared, so an encoding bug is fixed once, not N times.
 
-use crate::Error;
+use crate::{Error, refusal};
 
 /// append a `u64`-length-prefixed byte slice.
 pub fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -112,7 +112,7 @@ impl<'a> Cursor<'a> {
             0 => Ok(false),
             1 => Ok(true),
             other => Err(Error::module(
-                "codec",
+                refusal::INVALID_INPUT,
                 format!("{what} flag must be 0 or 1, got {other}"),
             )),
         }
@@ -131,7 +131,7 @@ impl<'a> Cursor<'a> {
         let len = self.u64(what)?;
         if len > self.max_field_len as u64 {
             return Err(Error::module(
-                "codec",
+                refusal::INVALID_INPUT,
                 format!(
                     "{what} length {len} exceeds the field cap {}",
                     self.max_field_len
@@ -140,7 +140,7 @@ impl<'a> Cursor<'a> {
         }
         if len > self.buf.len() as u64 {
             return Err(Error::module(
-                "codec",
+                refusal::INVALID_INPUT,
                 format!(
                     "{what} length {len} exceeds the {} remaining bytes",
                     self.buf.len()
@@ -157,7 +157,7 @@ impl<'a> Cursor<'a> {
         let raw = self.bytes(what)?;
         std::str::from_utf8(raw)
             .map(str::to_string)
-            .map_err(|e| Error::module("codec", format!("{what} is not utf-8: {e}")))
+            .map_err(|e| Error::module(refusal::INVALID_INPUT, format!("{what} is not utf-8: {e}")))
     }
 
     /// an optional utf-8 string: flag byte `0` (absent) or `1` + a non-empty,
@@ -168,20 +168,24 @@ impl<'a> Cursor<'a> {
             1 => {
                 let raw = self.bytes(what)?;
                 if raw.is_empty() {
-                    return Err(Error::module("codec", format!("{what} flag set but empty")));
+                    return Err(Error::module(
+                        refusal::INVALID_INPUT,
+                        format!("{what} flag set but empty"),
+                    ));
                 }
                 if raw.len() > max {
                     return Err(Error::module(
-                        "codec",
+                        refusal::INVALID_INPUT,
                         format!("{what} exceeds the {max}-byte limit"),
                     ));
                 }
-                let s = std::str::from_utf8(raw)
-                    .map_err(|e| Error::module("codec", format!("{what} is not utf-8: {e}")))?;
+                let s = std::str::from_utf8(raw).map_err(|e| {
+                    Error::module(refusal::INVALID_INPUT, format!("{what} is not utf-8: {e}"))
+                })?;
                 Ok(Some(s.to_string()))
             }
             other => Err(Error::module(
-                "codec",
+                refusal::INVALID_INPUT,
                 format!("{what} flag must be 0 or 1, got {other}"),
             )),
         }
@@ -211,7 +215,7 @@ impl<'a> Cursor<'a> {
     pub fn bound(&self, count: u64, min_each: u64, what: &str) -> Result<(), Error> {
         if count > (self.buf.len() as u64) / min_each.max(1) {
             return Err(Error::module(
-                "codec",
+                refusal::INVALID_INPUT,
                 format!(
                     "{what} count {count} exceeds the {} remaining bytes",
                     self.buf.len()
@@ -227,7 +231,7 @@ impl<'a> Cursor<'a> {
             Ok(())
         } else {
             Err(Error::module(
-                "codec",
+                refusal::INVALID_INPUT,
                 format!("{what} carries {} trailing bytes", self.buf.len()),
             ))
         }
@@ -235,7 +239,7 @@ impl<'a> Cursor<'a> {
 }
 
 fn truncated(what: &str) -> Error {
-    Error::module("codec", format!("{what} truncated"))
+    Error::module(refusal::INVALID_INPUT, format!("{what} truncated"))
 }
 
 #[cfg(test)]

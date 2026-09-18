@@ -40,7 +40,7 @@ impl Guest for Component {
     }
 
     fn acknowledge(_ack: host::Ack) -> Result<(), host::Error> {
-        Err(refused("no_outbound_queue", "module has no outbound queue"))
+        Err(refused("unsupported", "This module has no outbound queue."))
     }
 
     fn shape() -> host::ModuleShape {

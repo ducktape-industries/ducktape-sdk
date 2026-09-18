@@ -41,11 +41,11 @@ pub fn persist_objects<S: ObjectStore>(
     for (kind, body) in objects {
         store
             .put(*kind, body)
-            .map_err(|e| Error::module("odb_write", e))?;
+            .map_err(|e| Error::module(crate::STORAGE, e))?;
     }
     store
         .sync_dirs()
-        .map_err(|e| Error::module("odb_write", e))?;
+        .map_err(|e| Error::module(crate::STORAGE, e))?;
     Ok(())
 }
 
@@ -73,7 +73,7 @@ pub fn commit_refs<S: ObjectStore, R: RefsStore>(
     // 4. the commit point: refs file durable (atomic rename + parent fsync).
     refs_store
         .save(&refs, height, gc_watermark)
-        .map_err(|e| Error::module("refs_save", e))?;
+        .map_err(|e| Error::module(crate::STORAGE, e))?;
     // 5. adopt — root advances only now that the refs file is durable.
     fs.adopt_refs(refs);
     // 6. gc watermark trigger — per-node bookkeeping, NOT consensus (the root
@@ -102,7 +102,7 @@ pub fn commit_refs<S: ObjectStore, R: RefsStore>(
     }
     refs_store
         .save(fs.refs(), height, height)
-        .map_err(|e| Error::module("refs_save", format!("{e} (advancing the gc watermark)")))?;
+        .map_err(|e| Error::module(crate::STORAGE, format!("{e} (advancing the gc watermark)")))?;
     Ok(height)
 }
 

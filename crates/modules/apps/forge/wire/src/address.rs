@@ -6,6 +6,7 @@
 //! beside the wire surface everything else links, and not in the grammar.
 
 use duck_address::{Address, Refused};
+use sdk::refusal::INVALID_INPUT;
 
 /// forge's path: `duck://<chain>/forge/<owner>/<repo>`.
 ///
@@ -36,7 +37,7 @@ impl TryFrom<&Address> for ForgeRepoAddress {
     fn try_from(address: &Address) -> Result<Self, Refused> {
         if address.module != "forge" {
             return Err(Refused::new(
-                "forge_path_shape",
+                INVALID_INPUT,
                 format!(
                     "A forge address is `duck://<chain>/forge/<owner>/<repo>`, but this one names the module `{}`.",
                     address.module
@@ -45,7 +46,7 @@ impl TryFrom<&Address> for ForgeRepoAddress {
         }
         let [owner, repo] = address.path.as_slice() else {
             return Err(Refused::new(
-                "forge_path_shape",
+                INVALID_INPUT,
                 format!(
                     "A forge address is `duck://<chain>/forge/<owner>/<repo>` — two segments after `forge` — and this one carries {}.",
                     address.path.len()
@@ -54,7 +55,7 @@ impl TryFrom<&Address> for ForgeRepoAddress {
         };
         if repo.ends_with(".git") {
             return Err(Refused::new(
-                "repo_suffix",
+                INVALID_INPUT,
                 format!(
                     "Drop the `.git` from `{repo}`: an address names the forge repository, not a directory, and git is happy without it."
                 ),
@@ -75,7 +76,7 @@ impl TryFrom<&Address> for ForgeRepoAddress {
 fn name(part: &str, value: &str) -> Result<String, Refused> {
     let refuse = |why: &str| {
         Err(Refused::new(
-            "repo_name",
+            INVALID_INPUT,
             format!("A forge {part} name {why}, and `{value}` does not."),
         ))
     };
@@ -102,10 +103,16 @@ mod tests {
         Address::parse(text).expect("the shared grammar parses this")
     }
 
-    fn refused(text: &str) -> &'static str {
-        ForgeRepoAddress::try_from(&address(text))
-            .expect_err("refused")
-            .reason
+    /// every forge refusal is one class (fix the address), so the sentence
+    /// is what tells the rules apart.
+    fn refused(text: &str) -> String {
+        sentence(ForgeRepoAddress::try_from(&address(text)))
+    }
+
+    fn sentence(parsed: Result<ForgeRepoAddress, Refused>) -> String {
+        let refused = parsed.expect_err("refused");
+        assert_eq!(refused.reason, INVALID_INPUT);
+        refused.sentence
     }
 
     #[test]
@@ -119,39 +126,40 @@ mod tests {
 
     #[test]
     fn the_path_is_exactly_two_segments() {
-        assert_eq!(refused("duck://dognet-b5b6ea90/forge"), "forge_path_shape");
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/forge/alice"),
-            "forge_path_shape"
-        );
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/forge/alice/my-crate/src"),
-            "forge_path_shape"
-        );
+        for text in [
+            "duck://dognet-b5b6ea90/forge",
+            "duck://dognet-b5b6ea90/forge/alice",
+            "duck://dognet-b5b6ea90/forge/alice/my-crate/src",
+        ] {
+            assert!(
+                refused(text).contains("two segments after `forge`"),
+                "{text}"
+            );
+        }
     }
 
     #[test]
     fn a_dot_git_suffix_is_refused() {
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/forge/alice/my-crate.git"),
-            "repo_suffix"
+        assert!(
+            refused("duck://dognet-b5b6ea90/forge/alice/my-crate.git")
+                .starts_with("Drop the `.git`")
         );
     }
 
     #[test]
     fn a_name_forge_would_refuse_is_refused_here() {
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/forge/alice/.tracker.bin"),
-            "repo_name"
+        assert!(
+            refused("duck://dognet-b5b6ea90/forge/alice/.tracker.bin")
+                .starts_with("A forge repository name never starts with `.`")
         );
-        assert_eq!(
-            refused("duck://dognet-b5b6ea90/forge/.alice/repo"),
-            "repo_name"
+        assert!(
+            refused("duck://dognet-b5b6ea90/forge/.alice/repo")
+                .starts_with("A forge owner name never starts with `.`")
         );
         let long = "a".repeat(MAX_REPO_NAME_LEN + 1);
-        assert_eq!(
-            refused(&format!("duck://dognet-b5b6ea90/forge/alice/{long}")),
-            "repo_name"
+        assert!(
+            refused(&format!("duck://dognet-b5b6ea90/forge/alice/{long}"))
+                .starts_with("A forge repository name is 1 to")
         );
         assert!(
             ForgeRepoAddress::try_from(&address(&format!(
@@ -174,11 +182,9 @@ mod tests {
             module: "forge".to_string(),
             path: vec!["alice".to_string(), "my~crate".to_string()],
         };
-        assert_eq!(
-            ForgeRepoAddress::try_from(&built)
-                .expect_err("refused")
-                .reason,
-            "repo_name"
+        assert!(
+            sentence(ForgeRepoAddress::try_from(&built))
+                .starts_with("A forge repository name carries only [a-z0-9._-]")
         );
     }
 
@@ -189,11 +195,8 @@ mod tests {
             module: "gateway".to_string(),
             path: vec!["alice".to_string(), "page".to_string()],
         };
-        assert_eq!(
-            ForgeRepoAddress::try_from(&built)
-                .expect_err("refused")
-                .reason,
-            "forge_path_shape"
+        assert!(
+            sentence(ForgeRepoAddress::try_from(&built)).contains("names the module `gateway`")
         );
     }
 }

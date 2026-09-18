@@ -172,7 +172,7 @@ impl Declared {
             Declared::Nothing => Ok(None),
             Declared::Value(bytes) => Ok(Some(bytes)),
             Declared::Oversized { len, cap } => Err(Error::module(
-                "declaration_cap",
+                refusal::CAPACITY,
                 format!("{what} exceeds cap ({len} > {cap})"),
             )),
         }
@@ -268,7 +268,7 @@ impl Origin {
 pub fn require_non_empty(field: &str, value: &str) -> Result<(), Error> {
     if value.is_empty() {
         return Err(Error::module(
-            "empty_field",
+            refusal::INVALID_INPUT,
             format!("{field} must not be empty"),
         ));
     }
@@ -288,19 +288,19 @@ pub const KEY_SEP: char = '\x1f';
 pub fn validate_id(field: &str, value: &str, max_bytes: usize) -> Result<(), Error> {
     if value.is_empty() {
         return Err(Error::module(
-            "empty_field",
+            refusal::INVALID_INPUT,
             format!("{field} must be non-empty"),
         ));
     }
     if value.len() > max_bytes {
         return Err(Error::module(
-            "field_too_long",
+            refusal::CAPACITY,
             format!("{field} is {} bytes; the cap is {max_bytes}", value.len()),
         ));
     }
     if value.contains(KEY_SEP) {
         return Err(Error::module(
-            "reserved_separator",
+            refusal::INVALID_INPUT,
             format!("{field} must not contain the reserved separator"),
         ));
     }
@@ -318,7 +318,7 @@ pub fn validate_id(field: &str, value: &str, max_bytes: usize) -> Result<(), Err
 pub fn verify_snapshot_root(actual: StateRoot, expected: StateRoot) -> Result<(), Error> {
     if actual != expected {
         return Err(Error::module(
-            "snapshot_root",
+            refusal::CORRUPT,
             format!("snapshot root mismatch: recomputed {actual:?}, expected {expected:?}"),
         ));
     }
@@ -548,8 +548,9 @@ pub enum Error {
     /// guard).
     BudgetExceeded,
     /// bubbled out of a module's `execute`/`query`: the module's own
-    /// snake_case token for the failure class it refused on, and the sentence
-    /// it refused with. The token is the module's word VERBATIM — there is no
+    /// snake_case token for the failure class it refused on (a [`refusal`]
+    /// class, or a domain class its wire crate names), and the sentence it
+    /// refused with. The token is the module's word VERBATIM — there is no
     /// default and no validation here, because a token the contract line
     /// invented would be a word no module chose and every consumer would then
     /// have to tell apart from one that was.
@@ -557,8 +558,8 @@ pub enum Error {
 }
 
 impl Error {
-    /// the module refusal constructor: a snake_case failure-class token and
-    /// the sentence a reader gets.
+    /// the module refusal constructor: a failure-class token (a [`refusal`]
+    /// constant) and the sentence a reader gets.
     pub fn module(reason: impl Into<String>, sentence: impl Into<String>) -> Self {
         Error::Module {
             reason: reason.into(),
@@ -581,9 +582,25 @@ impl core::fmt::Debug for Error {
     }
 }
 
+/// the sentence a reader gets. A module refusal is its sentence ONLY: the
+/// token is for branching, and a renderer that shows it prints it on its own.
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        core::fmt::Debug::fmt(self, f)
+        match self {
+            Error::UnknownModule(id) => write!(f, "Module {id} is not registered."),
+            Error::SelfQuery => {
+                f.write_str("A module cannot query itself; read its own state directly.")
+            }
+            Error::QueryUnsupported => f.write_str("This module has no query surface."),
+            Error::SyncUnsupported => f.write_str("This module has no state-sync surface."),
+            Error::SwapUnsupported => {
+                f.write_str("This module's code cannot be swapped at runtime.")
+            }
+            Error::BudgetExceeded => {
+                f.write_str("The follow-up drain exceeded its dispatch budget.")
+            }
+            Error::Module { sentence, .. } => f.write_str(sentence),
+        }
     }
 }
 
@@ -775,7 +792,7 @@ pub trait Module {
     /// never acknowledged.
     async fn acknowledge(&mut self, _ctx: &mut dyn Ctx, ack: &Ack) -> Result<(), Error> {
         Err(Error::module(
-            "no_outbound_queue",
+            refusal::UNSUPPORTED,
             format!(
                 "module has no outbound queue to acknowledge item {} for {}",
                 ack.item, ack.target
@@ -988,6 +1005,14 @@ mod tests {
             let bytes = borsh::to_vec(&origin).unwrap();
             assert_eq!(borsh::from_slice::<Origin>(&bytes).unwrap(), origin);
         }
+    }
+
+    /// Display is the sentence a reader gets; Debug keeps the token.
+    #[test]
+    fn a_module_refusal_displays_its_sentence_only() {
+        let error = Error::module(refusal::STALE, "x");
+        assert_eq!(error.to_string(), "x");
+        assert_eq!(format!("{error:?}"), "Module(stale: x)");
     }
 
     #[test]

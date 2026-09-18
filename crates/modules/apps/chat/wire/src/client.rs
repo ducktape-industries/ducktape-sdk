@@ -1920,7 +1920,7 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
     // "a/b"). unconditional consensus rule, mirroring the ':' gate.
     if channel_id.contains('/') {
         return Err(Error::module(
-            "channel_id_shape",
+            sdk::refusal::INVALID_INPUT,
             "channel ids may not contain '/'",
         ));
     }
@@ -1928,7 +1928,7 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
         Party::Account(_) | Party::Key(_) => {
             if channel_id.contains(':') {
                 return Err(Error::module(
-                    "channel_id_namespace",
+                    sdk::refusal::INVALID_INPUT,
                     "channel ids containing ':' are reserved for modules",
                 ));
             }
@@ -1937,7 +1937,7 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
         Party::Module(module) => {
             if !channel_id.starts_with(&format!("{module}:")) {
                 return Err(Error::module(
-                    "channel_id_namespace",
+                    sdk::refusal::INVALID_INPUT,
                     format!("module '{module}' may only create channel ids prefixed '{module}:'"),
                 ));
             }

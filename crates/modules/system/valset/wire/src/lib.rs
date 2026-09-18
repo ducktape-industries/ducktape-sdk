@@ -102,10 +102,10 @@ pub async fn members(ctx: &dyn Ctx, valset: &str) -> Result<Vec<Vec<u8>>, Error>
     let reply = ctx
         .query(valset, &encode_query(&ValsetQuery::Validators))
         .await?;
-    match decode_reply(&reply).map_err(|e| Error::module("codec", e))? {
+    match decode_reply(&reply).map_err(|e| Error::module(sdk::refusal::UNEXPECTED_REPLY, e))? {
         ValsetReply::Validators(members) => Ok(members),
         other => Err(Error::module(
-            "unexpected_reply",
+            sdk::refusal::UNEXPECTED_REPLY,
             format!("valset answered a Validators query with {other:?}"),
         )),
     }
@@ -123,12 +123,12 @@ pub async fn members_and_residents(
         &ctx.query(valset, &encode_query(&ValsetQuery::Validators))
             .await?,
     )
-    .map_err(|e| Error::module("codec", e))?
+    .map_err(|e| Error::module(sdk::refusal::UNEXPECTED_REPLY, e))?
     {
         ValsetReply::Validators(v) => v,
         other => {
             return Err(Error::module(
-                "unexpected_reply",
+                sdk::refusal::UNEXPECTED_REPLY,
                 format!("valset answered a Validators query with {other:?}"),
             ));
         }
@@ -137,12 +137,12 @@ pub async fn members_and_residents(
         &ctx.query(valset, &encode_query(&ValsetQuery::Residents))
             .await?,
     )
-    .map_err(|e| Error::module("codec", e))?
+    .map_err(|e| Error::module(sdk::refusal::UNEXPECTED_REPLY, e))?
     {
         ValsetReply::Residents(o) => o,
         other => {
             return Err(Error::module(
-                "unexpected_reply",
+                sdk::refusal::UNEXPECTED_REPLY,
                 format!("valset answered a Residents query with {other:?}"),
             ));
         }
@@ -156,24 +156,31 @@ mod tests {
     use futures::executor::block_on;
     use sdk_testkit::TestCtx;
 
-    /// The two refusal tokens the shared member read can carry. Consumers
-    /// branch on `reason`, so the words are part of the surface.
+    /// Both ways the shared member read refuses are one class: valset
+    /// answered something this read does not accept, bytes that do not decode
+    /// or the wrong arm. Consumers branch on `reason`, so the word is part of
+    /// the surface; the sentence tells the two apart.
     #[test]
     fn a_member_read_names_its_refusal() {
         let garbled = TestCtx::at_height(1).on_query("valset", |_| Ok(b"not a reply".to_vec()));
         let err = block_on(members(&garbled, "valset")).expect_err("undecodable reply");
-        let Error::Module { reason, .. } = err else {
+        let Error::Module { reason, sentence } = err else {
             panic!("a decode failure is a module refusal, got {err:?}");
         };
-        assert_eq!(reason, "codec");
+        assert_eq!(reason, sdk::refusal::UNEXPECTED_REPLY);
+        assert!(!sentence.starts_with("valset answered"), "{sentence}");
 
         let wrong = TestCtx::at_height(1).on_query("valset", |_| {
             Ok(encode_reply(&ValsetReply::Residents(vec![])))
         });
         let err = block_on(members(&wrong, "valset")).expect_err("the wrong reply arm");
-        let Error::Module { reason, .. } = err else {
+        let Error::Module { reason, sentence } = err else {
             panic!("a mismatched reply is a module refusal, got {err:?}");
         };
-        assert_eq!(reason, "unexpected_reply");
+        assert_eq!(reason, sdk::refusal::UNEXPECTED_REPLY);
+        assert!(
+            sentence.starts_with("valset answered a Validators query with"),
+            "{sentence}"
+        );
     }
 }

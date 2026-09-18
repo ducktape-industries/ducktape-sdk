@@ -238,6 +238,7 @@ dependencies = [
 name = "boards-wire"
 version = "0.1.0"
 dependencies = [
+ "refusal-class",
  "serde",
  "serde_json",
  "syn 2.0.119",
@@ -1032,6 +1033,9 @@ dependencies = [
 [[package]]
 name = "duck-address"
 version = "0.1.0"
+dependencies = [
+ "refusal-class",
+]
 
 [[package]]
 name = "duckdns"
@@ -2367,6 +2371,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "refusal-class"
+version = "0.1.0"
+
+[[package]]
 name = "regalloc2"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2496,6 +2504,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "borsh",
+ "refusal-class",
  "serde",
  "serde_json",
  "sha2 0.10.9",
