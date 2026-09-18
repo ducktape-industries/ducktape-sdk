@@ -175,16 +175,26 @@ pub struct TagRef {
     pub oid: String,
 }
 
+/// one tag an atomic [`crate::ForgeMsg::PushRefs`] creates. A tag is created
+/// once and never moves or goes away, so it has no previous oid to compare and
+/// no delete to say: the shape cannot spell either.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TagCreate {
+    /// the tag SHORT name ("v1.0") — never a full refname.
+    pub name: String,
+    /// raw 20-byte sha1: the commit for a lightweight tag, the tag object for
+    /// an annotated one.
+    pub oid: Vec<u8>,
+}
+
 /// one ref command inside an atomic [`crate::ForgeMsg::PushRefs`]: a per-ref
-/// compare-and-swap. In `updates` it moves a BRANCH: `new_oid: None` deletes
-/// it (never "main"), `prev_oid: None` requires it unborn. In `tags` it
-/// creates a TAG: `prev_oid` is `None` and `new_oid` is set, because a tag
-/// never moves and is never deleted. raw 20-byte sha1 oids.
+/// compare-and-swap. `new_oid: None` deletes the branch (never "main");
+/// `prev_oid: None` requires the branch to be unborn. raw 20-byte sha1 oids.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RefUpdate {
-    /// the ref's SHORT name ("main", "feature/x", "v1.0") — never a full
-    /// refname: the list that carries it says whether it is a branch or a tag.
+    /// the branch SHORT name ("main", "feature/x") — never a full refname.
     pub ref_name: String,
     pub prev_oid: Option<Vec<u8>>,
     pub new_oid: Option<Vec<u8>>,

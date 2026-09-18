@@ -50,8 +50,8 @@ pub struct PushCert {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ForgeMsg {
     /// the atomic multi-ref push: every [`RefUpdate`] in `updates` is a
-    /// per-branch CAS against that branch's COMMITTED head, every one in `tags`
-    /// creates a tag, and the whole op stages or the whole op rejects.
+    /// per-branch CAS against that branch's COMMITTED head, every [`TagCreate`]
+    /// in `tags` creates a tag, and the whole op stages or the whole op rejects.
     /// `pack_digest` (sha256, 32 raw bytes) locates the ONE packfile carrying
     /// the closure of every updated head and created tag; a delete-only push
     /// carries `None`. this is what a stock `git push` lands as (the smart-HTTP
@@ -60,12 +60,11 @@ pub enum ForgeMsg {
         repo: String,
         updates: Vec<RefUpdate>,
         /// the tags this push creates. a tag is created once and never moves:
-        /// one whose `prev_oid` is set, whose `new_oid` is absent, or whose
-        /// name the repo already holds refuses the whole op. a push that
-        /// creates none leaves the key out, so it reads exactly as a
+        /// one whose name the repo already holds refuses the whole op. a push
+        /// that creates none leaves the key out, so it reads exactly as a
         /// branch-only push always has.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tags: Vec<RefUpdate>,
+        tags: Vec<TagCreate>,
         pack_digest: Option<Vec<u8>>,
         /// `git push --signed`'s push certificate, when the pusher sent one:
         /// the PRINCIPAL becomes the certificate's SSH signer (its account),
@@ -565,9 +564,9 @@ mod tests {
         let tagged = ForgeMsg::PushRefs {
             repo: "docs".into(),
             updates: vec![branch.clone()],
-            tags: vec![RefUpdate {
-                ref_name: "v1".into(),
-                ..branch
+            tags: vec![TagCreate {
+                name: "v1".into(),
+                oid: vec![1; 20],
             }],
             pack_digest: Some(vec![2; 32]),
             cert: None,
