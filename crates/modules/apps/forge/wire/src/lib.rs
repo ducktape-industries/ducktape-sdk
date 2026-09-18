@@ -49,15 +49,23 @@ pub struct PushCert {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ForgeMsg {
-    /// the atomic multi-branch push: every [`RefUpdate`] is a per-branch CAS
-    /// against that branch's COMMITTED head, and the whole list stages or the
-    /// whole op rejects. `pack_digest` (sha256, 32 raw bytes) locates the ONE
-    /// packfile carrying the closure of every updated head; a delete-only push
+    /// the atomic multi-ref push: every [`RefUpdate`] in `updates` is a
+    /// per-branch CAS against that branch's COMMITTED head, every one in `tags`
+    /// creates a tag, and the whole op stages or the whole op rejects.
+    /// `pack_digest` (sha256, 32 raw bytes) locates the ONE packfile carrying
+    /// the closure of every updated head and created tag; a delete-only push
     /// carries `None`. this is what a stock `git push` lands as (the smart-HTTP
     /// bridge translates the command list).
     PushRefs {
         repo: String,
         updates: Vec<RefUpdate>,
+        /// the tags this push creates. a tag is created once and never moves:
+        /// one whose `prev_oid` is set, whose `new_oid` is absent, or whose
+        /// name the repo already holds refuses the whole op. a push that
+        /// creates none leaves the key out, so it reads exactly as a
+        /// branch-only push always has.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<RefUpdate>,
         pack_digest: Option<Vec<u8>>,
         /// `git push --signed`'s push certificate, when the pusher sent one:
         /// the PRINCIPAL becomes the certificate's SSH signer (its account),
@@ -145,6 +153,8 @@ pub enum ForgeQuery {
     ListRepos,
     /// every born branch of a repo, sorted by name.
     ListRefs { repo: String },
+    /// every tag of a repo, sorted by name.
+    ListTags { repo: String },
     /// every issue/PR of a repo, ascending by number (team-scale: no paging).
     ListItems { repo: String },
     /// one item in full — body, branches, reviews, discussion channel id.
@@ -227,6 +237,8 @@ pub enum ForgeReply {
     Repos(Vec<RepoHead>),
     /// a repo's born branches (the reply to [`ForgeQuery::ListRefs`]).
     Refs(Vec<crate::tracker_iface::RefHead>),
+    /// a repo's tags (the reply to [`ForgeQuery::ListTags`]).
+    Tags(Vec<crate::tracker_iface::TagRef>),
     /// a repo's items (the reply to [`ForgeQuery::ListItems`]).
     Items(Vec<crate::tracker_iface::ItemSummary>),
     /// one full item (the reply to [`ForgeQuery::GetItem`]). boxed: an
@@ -524,10 +536,43 @@ mod tests {
             ForgeMsg::PushRefs {
                 repo: String::new(),
                 updates: Vec::new(),
+                tags: Vec::new(),
                 pack_digest: None,
                 cert: None,
             }
         );
+    }
+
+    #[test]
+    fn a_push_names_its_tags_only_when_it_creates_one() {
+        let branch = RefUpdate {
+            ref_name: "main".into(),
+            prev_oid: None,
+            new_oid: Some(vec![1; 20]),
+        };
+        let branch_only = ForgeMsg::PushRefs {
+            repo: "docs".into(),
+            updates: vec![branch.clone()],
+            tags: Vec::new(),
+            pack_digest: Some(vec![2; 32]),
+            cert: None,
+        };
+        let json: serde_json::Value = serde_json::from_slice(&encode_msg(&branch_only)).unwrap();
+        assert!(
+            json["push_refs"].get("tags").is_none(),
+            "a push that creates no tag leaves the key out"
+        );
+        let tagged = ForgeMsg::PushRefs {
+            repo: "docs".into(),
+            updates: vec![branch.clone()],
+            tags: vec![RefUpdate {
+                ref_name: "v1".into(),
+                ..branch
+            }],
+            pack_digest: Some(vec![2; 32]),
+            cert: None,
+        };
+        assert_eq!(decode_msg(&encode_msg(&tagged)).unwrap(), tagged);
     }
 
     #[test]
@@ -560,6 +605,9 @@ mod tests {
                 repo: "docs".into(),
             },
             ForgeQuery::ListRepos,
+            ForgeQuery::ListTags {
+                repo: "docs".into(),
+            },
             tree_query.clone(),
             blob_query,
             bytes_query,
@@ -585,6 +633,18 @@ mod tests {
             },
         ]);
         assert_eq!(decode_reply(&encode_reply(&reply)).unwrap(), reply);
+        let tags = ForgeReply::Tags(vec![TagRef {
+            name: "v1".into(),
+            oid: "1".repeat(40),
+        }]);
+        assert_eq!(decode_reply(&encode_reply(&tags)).unwrap(), tags);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&encode_reply(&tags)).unwrap(),
+            serde_json::json!({ "tags": [{
+                "name": "v1",
+                "oid": "1111111111111111111111111111111111111111",
+            }]})
+        );
 
         let tree = ForgeReply::Tree(TreeReply {
             rev: "1".repeat(40),
