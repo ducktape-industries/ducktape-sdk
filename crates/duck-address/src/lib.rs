@@ -22,9 +22,19 @@
 //! `ForgeRepoAddress`, so a module's name rule has one home and this grammar
 //! does not grow a branch per module.
 //!
-//! Lowercase throughout, and nothing here case-folds: two spellings of one
-//! address would be two cache keys, two lock-file lines and two registry
-//! lookups.
+//! THE TAIL CARRIES ANY NAME, IN EXACTLY ONE SPELLING. A module names files
+//! and ids that are not `[a-z0-9._-]` (`보고서 Final.pdf`, `Blk_7`), so a
+//! segment after the module may hold any text but `/`, NUL, `.` and `..`.
+//! [`Address::path`] holds it decoded; `Display` writes a byte literally iff it
+//! is RFC 3986 unreserved (`A-Z a-z 0-9 - . _ ~`) and every other byte as `%XX`
+//! in uppercase hex; `parse` refuses every other spelling of the same name
+//! (lowercase hex, an escaped unreserved byte, a literal space) instead of
+//! normalising it. Two spellings of one address would be two cache keys, two
+//! lock-file lines and two registry lookups.
+//!
+//! The chain id and the module segment are never encoded and are lowercase,
+//! and nothing here case-folds anything: `A` and `a` in a tail segment are two
+//! names.
 //!
 //! See ducktape#2616 (design note v3) for why the grammar is this.
 
@@ -110,9 +120,11 @@ impl std::str::FromStr for ChainId {
 
 /// a parsed `duck://` address.
 ///
-/// `path` is everything after the module segment, kept verbatim: what it means
-/// is the module's question. `Address::parse` and [`Display`](std::fmt::Display)
-/// round-trip — a parsed address prints the string it came from.
+/// `path` is everything after the module segment, DECODED — `보고서 Final.pdf`,
+/// never `%EB%B3%B4…` — and what it means is the module's question.
+/// `Address::parse` and [`Display`](std::fmt::Display) round-trip both ways: a
+/// parsed address prints the string it came from, and that string is the only
+/// one that parses to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Address {
     pub chain: ChainId,
@@ -122,7 +134,6 @@ pub struct Address {
 
 impl Address {
     pub fn parse(text: &str) -> Result<Self, Refused> {
-        lowercase(text)?;
         let rest = text.strip_prefix(SCHEME).ok_or_else(|| {
             Refused::new(
                 INVALID_INPUT,
@@ -150,20 +161,10 @@ impl Address {
             if segment.is_empty() {
                 return Err(empty(text));
             }
-            if !segment
-                .bytes()
-                .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
-            {
-                return Err(Refused::new(
-                    INVALID_INPUT,
-                    format!(
-                        "A duck:// path segment carries only [a-z0-9._-], and `{segment}` does not."
-                    ),
-                ));
-            }
-            segments.push(segment.to_string());
+            segments.push(segment);
         }
-        let module = segments.remove(0);
+        let module = segments.remove(0).to_string();
+        lowercase(&module)?;
         // one module claims a name today. The others (gateway browse, in-app
         // pages) migrate onto this grammar in their own units — ducktape#2616
         // §4 — and each adds its name HERE, so an address for a module nobody
@@ -177,7 +178,7 @@ impl Address {
         Ok(Address {
             chain,
             module,
-            path: segments,
+            path: segments.into_iter().map(decode).collect::<Result<_, _>>()?,
         })
     }
 }
@@ -191,10 +192,72 @@ impl std::fmt::Display for Address {
             self.module
         )?;
         for segment in &self.path {
-            write!(formatter, "/{segment}")?;
+            formatter.write_str("/")?;
+            for byte in segment.bytes() {
+                match unreserved(byte) {
+                    true => write!(formatter, "{}", byte as char)?,
+                    false => write!(formatter, "%{byte:02X}")?,
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// RFC 3986's unreserved bytes: the only ones a path segment writes literally.
+fn unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// one tail segment, from its one spelling to the name it carries. Every other
+/// spelling of the same name is refused, never normalised.
+fn decode(segment: &str) -> Result<String, Refused> {
+    let refuse = |rule: &str| {
+        Err(Refused::new(
+            INVALID_INPUT,
+            format!("A duck:// path segment {rule}, and `{segment}` does not."),
+        ))
+    };
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        if unreserved(byte) {
+            decoded.push(byte);
+            continue;
+        }
+        if byte != b'%' {
+            return refuse("writes only [A-Za-z0-9._~-] literally and every other byte as `%XX`");
+        }
+        let (high, low) = match (bytes.next(), bytes.next()) {
+            (Some(high), Some(low)) if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() => {
+                (high, low)
+            }
+            _ => return refuse("writes `%` only to open a `%XX` escape of two hex digits"),
+        };
+        if high.is_ascii_lowercase() || low.is_ascii_lowercase() {
+            return refuse("writes a `%XX` escape in uppercase hex");
+        }
+        // both are 0-9 or A-F here
+        let nibble = |digit: u8| match digit.is_ascii_digit() {
+            true => digit - b'0',
+            false => digit - b'A' + 10,
+        };
+        let escaped = nibble(high) << 4 | nibble(low);
+        if unreserved(escaped) {
+            return refuse("writes [A-Za-z0-9._~-] literally, never as `%XX`");
+        }
+        decoded.push(escaped);
+    }
+    let Ok(decoded) = String::from_utf8(decoded) else {
+        return refuse("decodes to UTF-8 text");
+    };
+    if decoded.contains(['/', '\0']) {
+        return refuse("decodes to a name with no `/` and no NUL in it");
+    }
+    if decoded == "." || decoded == ".." {
+        return refuse("names something other than `.` or `..`");
+    }
+    Ok(decoded)
 }
 
 /// why an address was refused: a token to BRANCH on and a sentence to SHOW.
@@ -240,7 +303,7 @@ fn lowercase(text: &str) -> Result<(), Refused> {
         true => Err(Refused::new(
             INVALID_INPUT,
             format!(
-                "A duck:// address is lowercase throughout and nothing case-folds it, but `{text}` carries an uppercase letter."
+                "A duck:// chain id and module segment are lowercase and nothing case-folds them, but `{text}` carries an uppercase letter."
             ),
         )),
         false => Ok(()),
@@ -306,6 +369,69 @@ mod tests {
         }
     }
 
+    fn forge(path: &[&str]) -> Address {
+        Address {
+            chain: chain(),
+            module: "forge".to_string(),
+            path: path.iter().map(|segment| segment.to_string()).collect(),
+        }
+    }
+
+    /// a tail segment carries any name, and exactly one string spells it.
+    #[test]
+    fn a_segment_carries_any_name_in_one_spelling() {
+        for (path, text) in [
+            (
+                &["files", "shared", "보고서 Final.pdf"][..],
+                "duck://dognet-b5b6ea90/forge/files/shared/%EB%B3%B4%EA%B3%A0%EC%84%9C%20Final.pdf",
+            ),
+            (&["a~b"], "duck://dognet-b5b6ea90/forge/a~b"),
+            (
+                &["pages", "Blk_7"],
+                "duck://dognet-b5b6ea90/forge/pages/Blk_7",
+            ),
+            (&["%"], "duck://dognet-b5b6ea90/forge/%25"),
+            (&["a?b#c"], "duck://dognet-b5b6ea90/forge/a%3Fb%23c"),
+            (&["..."], "duck://dognet-b5b6ea90/forge/..."),
+        ] {
+            let address = forge(path);
+            assert_eq!(address.to_string(), text);
+            assert_eq!(Address::parse(text), Ok(address));
+        }
+    }
+
+    /// `A` and `a` are two names: nothing folds one into the other.
+    #[test]
+    fn case_in_a_segment_is_kept() {
+        let upper = Address::parse("duck://dognet-b5b6ea90/forge/A").expect("parses");
+        let lower = Address::parse("duck://dognet-b5b6ea90/forge/a").expect("parses");
+        assert_eq!(upper.path, ["A"]);
+        assert_ne!(upper, lower);
+    }
+
+    /// every ASCII byte and a few multi-byte names, as a one-segment tail: the
+    /// printed address uses only the canonical alphabet and parses back to the
+    /// same name, or the name is one no segment may carry and is refused.
+    #[test]
+    fn every_name_prints_canonically_and_parses_back() {
+        let ascii = (0x01..=0x7F_u8).map(|byte| (byte as char).to_string());
+        let wider = ["보고서 Final.pdf", "é", "日本語", "🦆", "a b+c", "%41"].map(String::from);
+        for name in ascii.chain(wider) {
+            let address = forge(&[&name]);
+            let text = address.to_string();
+            if name == "/" || name == "." {
+                assert!(Address::parse(&text).is_err(), "{text}");
+                continue;
+            }
+            assert!(
+                text.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._~%/:-".contains(&byte)),
+                "{text}"
+            );
+            assert_eq!(Address::parse(&text), Ok(address), "{name:?}");
+        }
+    }
+
     #[test]
     fn a_label_may_carry_dashes_and_the_last_one_splits() {
         let address = Address::parse("duck://my-long-net-b5b6ea90/forge/a/b").expect("parses");
@@ -333,13 +459,19 @@ mod tests {
         refused.sentence
     }
 
-    const UPPERCASE: &str = "is lowercase throughout";
+    const UPPERCASE: &str = "are lowercase and nothing case-folds them";
     const NO_SCHEME: &str = "starts with `duck://`";
     const EXTRA: &str = "carries no credentials, port, query or fragment";
     const EMPTY: &str = "none of them empty";
     const AUTHORITY: &str = "authority is the whole chain id";
-    const CHARSET: &str = "path segment carries only [a-z0-9._-]";
     const NO_MODULE: &str = "names no ducktape module";
+    const LITERAL: &str = "writes only [A-Za-z0-9._~-] literally";
+    const ESCAPE: &str = "writes `%` only to open a `%XX` escape of two hex digits";
+    const LOWER_HEX: &str = "writes a `%XX` escape in uppercase hex";
+    const ESCAPED_UNRESERVED: &str = "writes [A-Za-z0-9._~-] literally, never as `%XX`";
+    const UTF8: &str = "decodes to UTF-8 text";
+    const SLASH_OR_NUL: &str = "decodes to a name with no `/` and no NUL in it";
+    const DOT: &str = "names something other than `.` or `..`";
 
     #[test]
     fn every_refusal_names_the_rule_it_broke() {
@@ -361,12 +493,38 @@ mod tests {
             ("duck://dognet-b5b6ea9/forge/a/b", AUTHORITY),
             ("duck://dognet-b5b6ea90z/forge/a/b", AUTHORITY),
             ("duck://-b5b6ea90/forge/a/b", AUTHORITY),
-            ("duck://dognet-b5b6ea90/forge/a~b", CHARSET),
+            ("duck://dognet-b5b6ea90/Forge/a/b", UPPERCASE),
             ("duck://dognet-b5b6ea90/gateway/a/b", NO_MODULE),
+            ("duck://dognet-b5b6ea90/forge/a b", LITERAL),
+            ("duck://dognet-b5b6ea90/forge/a+b", LITERAL),
+            ("duck://dognet-b5b6ea90/forge/a:b", LITERAL),
+            ("duck://dognet-b5b6ea90/forge/a@b", LITERAL),
+            ("duck://dognet-b5b6ea90/forge/보고서", LITERAL),
+            ("duck://dognet-b5b6ea90/forge/a%", ESCAPE),
+            ("duck://dognet-b5b6ea90/forge/a%4", ESCAPE),
+            ("duck://dognet-b5b6ea90/forge/%G1", ESCAPE),
+            ("duck://dognet-b5b6ea90/forge/%%41", ESCAPE),
+            ("duck://dognet-b5b6ea90/forge/%e4", LOWER_HEX),
+            ("duck://dognet-b5b6ea90/forge/%Ea", LOWER_HEX),
+            ("duck://dognet-b5b6ea90/forge/%41", ESCAPED_UNRESERVED),
+            ("duck://dognet-b5b6ea90/forge/%7E", ESCAPED_UNRESERVED),
+            ("duck://dognet-b5b6ea90/forge/%2E%2E", ESCAPED_UNRESERVED),
+            ("duck://dognet-b5b6ea90/forge/%FF", UTF8),
+            ("duck://dognet-b5b6ea90/forge/%EB%B3", UTF8),
+            ("duck://dognet-b5b6ea90/forge/a%2Fb", SLASH_OR_NUL),
+            ("duck://dognet-b5b6ea90/forge/a%00b", SLASH_OR_NUL),
+            ("duck://dognet-b5b6ea90/forge/.", DOT),
+            ("duck://dognet-b5b6ea90/forge/a/../b", DOT),
         ] {
             let sentence = refused(text);
             assert!(sentence.contains(rule), "{text}: {sentence}");
         }
+    }
+
+    /// a segment refusal quotes the segment as written, not the whole address.
+    #[test]
+    fn a_segment_refusal_quotes_the_segment() {
+        assert!(refused("duck://dognet-b5b6ea90/forge/ok/%e4").ends_with("and `%e4` does not."));
     }
 
     /// the app's page origin is a different address family (a dotted host, no

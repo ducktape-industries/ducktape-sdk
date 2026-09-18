@@ -170,11 +170,12 @@ mod tests {
         );
     }
 
-    /// the shared grammar's segment rule and forge's name rule agree today, so
-    /// a bad character cannot arrive through `Address::parse`. It can arrive
-    /// through a hand-built `Address`, and this check is forge's own — the
-    /// module's validator is the one that matters, and this mirrors it whole
-    /// rather than leaning on the parser upstream staying this strict.
+    /// forge narrows the shared grammar: a path segment may carry any name
+    /// (`~`, uppercase, a percent-encoded space), and a forge name only
+    /// `[a-z0-9._-]`. So a name forge refuses arrives through `Address::parse`
+    /// as readily as through a hand-built `Address`, and this check is forge's
+    /// own — the module's validator is the one that matters, and this mirrors
+    /// it whole rather than leaning on the parser upstream.
     #[test]
     fn the_name_rule_does_not_lean_on_the_parser() {
         let built = Address {
