@@ -1,10 +1,16 @@
 # Flip runbook: ducktape-sdk's git dependencies from GitHub to Forge
 
-Status: **written, not executed.** It runs only after core #2675 lands (the
-node's git endpoint answers want-by-SHA) and the `git-remote-duck` helper and
-`ducktape forge setup` exist (core #2616, design note v4). ducktape-sdk is the
-first repository in the cut-over order because it has exactly one git
-dependency.
+Status: **written, not executed.** It runs once the `git-remote-duck` helper
+and `ducktape forge setup` exist (core #2616). ducktape-sdk is the first
+repository in the cut-over order because it has exactly one git dependency.
+
+Verified on the pinned toolchain (cargo 1.96.1, evidence on core #2616):
+Cargo accepts `git = "duck://…"` and writes it into `Cargo.lock`, but ONLY
+with `net.git-fetch-with-cli = true` (the default libgit2 path refuses the
+scheme with `invalid argument: 'port'`). For a `rev` Cargo fetches branch
+heads and tags and resolves the commit locally; it never sends a want for the
+pinned SHA. So the pin must be reachable from a mirrored branch or tag, and
+the node's want-by-SHA support (core #2675) is NOT a precondition.
 
 The rule this runbook keeps (owner direction 6): GitHub stays. `duck://` is a
 second spelling of the same commits, the flip is per repository, opt-in, and
@@ -18,19 +24,15 @@ today; use whatever `Cargo.toml` pins on the day.
 
 ## 0. Preconditions (check, do not assume)
 
-1. core #2675 is merged and the node you resolve through runs it:
-   `git fetch http://<node>/<forge git route>/ducktape-industries/fluent31 $REV`
-   succeeds for this non-tip commit.
-2. `ducktape forge setup --cargo` has run on this machine: `git-remote-duck` is
-   on `PATH`, the workspace registry holds `<chain>`, and the user's Cargo
-   config has `net.git-fetch-with-cli = true`.
-3. Cargo accepts the scheme: in a scratch crate,
-   `cargo metadata` with `git = "duck://<chain>/forge/ducktape-industries/fluent31", rev = "$REV"`
-   resolves. If Cargo refuses an unknown scheme, STOP: that is a design
-   finding for #2616, not something to work around here.
-4. The mirror holds the pinned commit (section 1 has run at least once):
-   `git ls-remote duck://<chain>/forge/ducktape-industries/fluent31` lists
-   `refs/heads/main`, and `git fetch duck://… $REV` succeeds.
+1. `ducktape forge setup` has run on this machine: `git-remote-duck` is on
+   `PATH` and the workspace registry holds `<chain>`. No per-user Cargo config
+   is needed; the flip commits the one setting into the repository (section 2).
+2. The mirror holds the pinned commit ON A BRANCH (section 1 has run at least
+   once): `git ls-remote duck://<chain>/forge/ducktape-industries/fluent31`
+   lists `refs/heads/main`, and in a scratch clone of that URL
+   `git merge-base --is-ancestor $REV origin/main` succeeds. A commit that
+   lives only on a deleted branch is unreachable, and Cargo then fails with
+   `revspec '<sha>' not found`.
 
 ## 1. The mirror (node host, no CI)
 
@@ -100,6 +102,11 @@ visible failure, never a different object. A failed unit (`systemctl
 
 ## 2. The flip (one PR, three files)
 
+0. Check, do not add: this repository's `.cargo/config.toml` already carries
+   `[net] git-fetch-with-cli = true`. Without it Cargo's default fetch path
+   refuses the `duck://` scheme. A repository that lacks the line adds it in
+   its own flip PR; it applies to every git dependency of that repository,
+   which then fetch through the git CLI with the developer's git credentials.
 1. `Cargo.toml` line `fluent-guest = { git = … }`:
    `https://github.com/ducktape-industries/fluent31` becomes
    `duck://<chain>/forge/ducktape-industries/fluent31`. `rev` does not move.
@@ -125,8 +132,8 @@ cargo test --workspace && make fixture-guests-check
 ```
 
 The clean `CARGO_HOME` matters: a warm one already holds the GitHub checkout
-and would prove nothing about Forge. (Copy the user's Cargo `config.toml` with
-`net.git-fetch-with-cli` into the temporary home first.)
+and would prove nothing about Forge. It needs no config of its own; the
+repository's `.cargo/config.toml` carries the setting.
 
 ## 3. The revert
 
