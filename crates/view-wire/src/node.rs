@@ -11,6 +11,19 @@ pub enum ButtonContent {
     Child(Box<Node>),
 }
 
+/// What a [`Node::MouseArea`] is to assistive technology. Every other
+/// interactive node's variant is its role.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Role {
+    Button,
+    Link,
+    Tab,
+    MenuItem,
+    Row,
+    Checkbox,
+    Switch,
+}
+
 /// One widget. `key` is the node's identity across frames — the
 /// accessibility path the compiler already computes (`App/content/count`)
 /// — which the host uses for widget state (focus, caret, scroll) and for
@@ -116,6 +129,13 @@ pub enum Node {
     /// with [`Event::Scroll`]. The node paints nothing of its own.
     MouseArea {
         key: String,
+        /// `None` is an area assistive technology does not announce.
+        role: Option<Role>,
+        /// The accessible name of an area no text inside names.
+        label: Option<String>,
+        expanded: Option<bool>,
+        selected: Option<bool>,
+        checked: Option<bool>,
         on_press: Option<u32>,
         on_release: Option<u32>,
         on_double_click: Option<u32>,
@@ -326,6 +346,8 @@ pub enum Node {
         options: Box<EditorOptions>,
         key: String,
         placeholder: String,
+        /// The accessible name.
+        label: Option<String>,
         /// A shared logical document; its bytes travel only through a requested transfer.
         document: editor_document::EditorDocumentRef,
         /// Mutable guest state route, present even while editing is disabled.
@@ -345,6 +367,7 @@ pub enum Node {
         label: Option<String>,
         checked: Option<bool>,
         expanded: Option<bool>,
+        selected: Option<bool>,
         description: Option<String>,
         /// `None` is a disabled button.
         on_press: Option<u32>,
@@ -393,6 +416,8 @@ pub enum Node {
     },
     Slider {
         key: String,
+        /// The accessible name.
+        label: Option<String>,
         value: f32,
         min: f32,
         max: f32,
@@ -411,6 +436,8 @@ pub enum Node {
         selected: Option<u32>,
         reset: u64,
         placeholder: String,
+        /// The accessible name.
+        label: Option<String>,
         on_select: u32,
         width: Option<Length>,
         settings: Box<ComboOptions>,
@@ -423,6 +450,8 @@ pub enum Node {
         options: Vec<String>,
         selected: Option<u32>,
         placeholder: Option<String>,
+        /// The accessible name.
+        label: Option<String>,
         on_select: u32,
         width: Option<Length>,
         style: PickListStyle,

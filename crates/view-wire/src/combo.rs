@@ -72,6 +72,7 @@ mod tests {
             selected: Some(MAX_OPTIONS as u32),
             reset: 0,
             placeholder: "é".repeat(MAX_STRING_BYTES),
+            label: None,
             on_select: 0,
             width: Some(Length::Fixed(f32::INFINITY)),
             settings: Box::new(ComboOptions {

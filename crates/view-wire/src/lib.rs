@@ -29,7 +29,10 @@
 /// 8: `Event::Response` carries `Result<Vec<u8>, Refusal>` (1b4d8a0 changed the
 ///    shape and left the epoch at 7; views deployed before it faulted with
 ///    "invalid u8 while decoding bool" on the first refusal frame).
-pub const WIRE_EPOCH: u32 = 8;
+/// 9: accessible names and roles: `label` on `Node::Editor`, `Slider`, `ComboBox`
+///    and `PickList`; `role`, `label`, `expanded`, `selected` and `checked` on
+///    `Node::MouseArea`; `selected` on `Node::Button`.
+pub const WIRE_EPOCH: u32 = 9;
 
 pub mod manifest;
 #[cfg(feature = "schema")]
@@ -120,7 +123,9 @@ mod surface;
 pub use surface::{MAX_SURFACE_DEPTH, MAX_SURFACE_VALUES, SurfaceValue, sanitize_surface_event};
 
 mod node;
-pub use node::{ButtonContent, Node};
+pub use node::{ButtonContent, Node, Role};
+mod accessibility;
+pub use accessibility::{Fault, FaultKind, accessibility_faults};
 mod patch;
 pub use patch::{MAX_PATCHES, Patch, apply, diff};
 
@@ -760,10 +765,14 @@ fn text_amounts(root: &Node) -> Result<(usize, usize), &'static str> {
             }
             Node::Editor {
                 placeholder,
+                label,
                 options,
                 ..
             } => {
                 add(placeholder);
+                if let Some(label) = label {
+                    add(label);
+                }
                 if let Some(rich) = &options.rich {
                     for item in &rich.toolbar {
                         add(&item.label);
@@ -772,7 +781,9 @@ fn text_amounts(root: &Node) -> Result<(usize, usize), &'static str> {
             }
             Node::Image { label, .. }
             | Node::ImageViewer { label, .. }
-            | Node::Svg { label, .. } => {
+            | Node::Svg { label, .. }
+            | Node::MouseArea { label, .. }
+            | Node::Slider { label, .. } => {
                 if let Some(label) = label {
                     add(label);
                 }
@@ -802,16 +813,21 @@ fn text_amounts(root: &Node) -> Result<(usize, usize), &'static str> {
             Node::ComboBox {
                 options,
                 placeholder,
+                label,
                 ..
             } => {
                 for option in options {
                     add(option);
                 }
                 add(placeholder);
+                if let Some(label) = label {
+                    add(label);
+                }
             }
             Node::PickList {
                 options,
                 placeholder,
+                label,
                 ..
             } => {
                 for option in options {
@@ -819,6 +835,9 @@ fn text_amounts(root: &Node) -> Result<(usize, usize), &'static str> {
                 }
                 if let Some(placeholder) = placeholder {
                     add(placeholder);
+                }
+                if let Some(label) = label {
+                    add(label);
                 }
             }
             _ => {}
@@ -1075,10 +1094,15 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
                 *delay = finite(*delay).max(0.0);
             }
         }
-        Node::ResizeHandle { key, .. }
-        | Node::MouseArea { key, .. }
-        | Node::Responsive { key, .. }
-        | Node::Lazy { key, .. } => claim(key, taken),
+        Node::MouseArea { key, label, .. } => {
+            claim(key, taken);
+            if let Some(label) = label {
+                truncate_string(label);
+            }
+        }
+        Node::ResizeHandle { key, .. } | Node::Responsive { key, .. } | Node::Lazy { key, .. } => {
+            claim(key, taken)
+        }
         Node::Stack {
             key,
             padding,
@@ -1320,6 +1344,7 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
             options,
             key,
             placeholder,
+            label,
             width,
             min_height,
             max_height,
@@ -1344,6 +1369,9 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
             options.style.sanitize();
             claim(key, taken);
             spend_text(placeholder, budgets);
+            if let Some(label) = label {
+                truncate_string(label);
+            }
             if let Some(font) = &mut options.font {
                 font.sanitize(budgets);
             }
@@ -1443,6 +1471,7 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
         }
         Node::Slider {
             key,
+            label,
             value,
             min,
             max,
@@ -1451,6 +1480,9 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
             ..
         } => {
             claim(key, taken);
+            if let Some(label) = label {
+                truncate_string(label);
+            }
             for number in [value, min, max, step] {
                 *number = finite(*number);
             }
@@ -1481,6 +1513,7 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
             options,
             selected,
             placeholder,
+            label,
             settings,
             ..
         } => {
@@ -1492,6 +1525,9 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
                 spend_text(option, budgets);
             }
             spend_text(placeholder, budgets);
+            if let Some(label) = label {
+                truncate_string(label);
+            }
             if selected.is_some_and(|index| index as usize >= options.len()) {
                 *selected = None;
             }
@@ -1502,10 +1538,14 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
             options,
             selected,
             placeholder,
+            label,
             style,
             ..
         } => {
             claim(key, taken);
+            if let Some(label) = label {
+                truncate_string(label);
+            }
             settings.sanitize(budgets);
             for face in [
                 &mut style.active,
@@ -2050,6 +2090,7 @@ mod tests {
             options: Default::default(),
             key: key.into(),
             placeholder: placeholder.into(),
+            label: None,
             document,
             on_document: 1,
             editable: true,
@@ -2212,6 +2253,7 @@ mod tests {
                 Node::Button {
                     checked: None,
                     expanded: None,
+                    selected: None,
                     description: None,
                     key: "App/b".into(),
                     content: ButtonContent::Label("Go".into()),
@@ -2237,6 +2279,7 @@ mod tests {
                     options: Default::default(),
                     key: "App/e".into(),
                     placeholder: "Notes".into(),
+                    label: None,
                     document: document_reference("app:draft", 9),
                     on_document: 5,
                     editable: true,
@@ -2659,6 +2702,7 @@ mod tests {
             Node::Button {
                 checked: None,
                 expanded: None,
+                selected: None,
                 description: Some("Details".into()),
                 key: "App/b".into(),
                 content: ButtonContent::Label(long.clone()),
@@ -2762,6 +2806,7 @@ mod tests {
         Node::Button {
             checked: None,
             expanded: None,
+            selected: None,
             description: None,
             key: "App/b".into(),
             content,
@@ -2798,6 +2843,11 @@ mod tests {
     fn mouse_area(key: &str, on_move: Option<u32>, content: Node) -> Node {
         Node::MouseArea {
             key: key.into(),
+            role: None,
+            label: None,
+            expanded: None,
+            selected: None,
+            checked: None,
             on_press: Some(1),
             on_release: None,
             on_double_click: None,
@@ -2843,6 +2893,99 @@ mod tests {
         ]));
         assert_eq!(children[1].key(), Some("App/m#2"));
         assert_eq!(children[1].children().len(), 1);
+    }
+
+    #[test]
+    fn control_labels_round_trip() {
+        let mut notes = editor("App/e", "Notes", document_reference("app:draft", 9));
+        let Node::Editor { label, .. } = &mut notes else {
+            unreachable!()
+        };
+        *label = Some("Notes".into());
+        let frame = Frame {
+            root: Some(column(vec![
+                notes,
+                Node::Slider {
+                    key: "App/s".into(),
+                    label: Some("Volume".into()),
+                    value: 0.5,
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.1,
+                    on_change: 1,
+                    on_release: None,
+                    axis: Axis::Row,
+                    width: None,
+                    height: None,
+                    style: SliderStyle::default(),
+                },
+                Node::ComboBox {
+                    key: "App/c".into(),
+                    state_key: "App/c".into(),
+                    options: vec!["Serif".into()],
+                    selected: None,
+                    reset: 0,
+                    placeholder: String::new(),
+                    label: Some("Font".into()),
+                    on_select: 2,
+                    width: None,
+                    settings: Box::default(),
+                },
+                Node::PickList {
+                    settings: Default::default(),
+                    key: "App/p".into(),
+                    options: vec!["Dark".into()],
+                    selected: Some(0),
+                    placeholder: None,
+                    label: Some("Theme".into()),
+                    on_select: 3,
+                    width: None,
+                    style: PickListStyle::default(),
+                },
+            ])),
+            ..Frame::default()
+        };
+        assert_eq!(decode::<Frame>(&encode(&frame)).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_mouse_areas_role_name_and_state_round_trip() {
+        let mut area = mouse_area("App/m", None, text("inside"));
+        let Node::MouseArea {
+            role,
+            label,
+            expanded,
+            selected,
+            checked,
+            ..
+        } = &mut area
+        else {
+            unreachable!()
+        };
+        *role = Some(Role::Checkbox);
+        *label = Some("Wrap lines".into());
+        *expanded = Some(false);
+        *selected = Some(true);
+        *checked = Some(true);
+        let frame = Frame {
+            root: Some(area),
+            ..Frame::default()
+        };
+        assert_eq!(decode::<Frame>(&encode(&frame)).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_selected_button_round_trips() {
+        let mut tab = button(ButtonContent::Label("Inbox".into()));
+        let Node::Button { selected, .. } = &mut tab else {
+            unreachable!()
+        };
+        *selected = Some(true);
+        let frame = Frame {
+            root: Some(tab),
+            ..Frame::default()
+        };
+        assert_eq!(decode::<Frame>(&encode(&frame)).unwrap(), frame);
     }
 
     /// Building and encoding a chain this deep recurses as far as decoding
@@ -3070,12 +3213,14 @@ mod tests {
                 options: (0..MAX_OPTIONS + 3).map(|i| i.to_string()).collect(),
                 selected: Some((MAX_OPTIONS + 1) as u32),
                 placeholder: Some("é".repeat(MAX_STRING_BYTES)),
+                label: None,
                 on_select: 0,
                 width: Some(Length::Fixed(f32::INFINITY)),
                 style: PickListStyle::default(),
             },
             Node::Slider {
                 key: "App/slide".into(),
+                label: None,
                 value: f32::NAN,
                 min: f32::NEG_INFINITY,
                 max: 1_000_000.0,

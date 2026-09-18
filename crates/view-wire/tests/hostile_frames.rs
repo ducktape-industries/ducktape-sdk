@@ -375,6 +375,7 @@ fn gen_button_label(rng: &mut Rng) -> Node {
     Node::Button {
         checked: rng.next_bool().then(|| rng.next_bool()),
         expanded: rng.next_bool().then(|| rng.next_bool()),
+        selected: rng.next_bool().then(|| rng.next_bool()),
         description: rng.next_bool().then(|| gen_string(rng)),
         key: gen_key(rng),
         content: ButtonContent::Label(gen_string(rng)),
@@ -467,6 +468,7 @@ fn gen_editor(rng: &mut Rng) -> Node {
         }),
         key: gen_key(rng),
         placeholder: gen_string(rng),
+        label: rng.next_bool().then(|| gen_string(rng)),
         width: rng.next_bool().then(|| gen_f32(rng)),
         height: gen_opt_length(rng),
         min_height: rng.next_bool().then(|| gen_f32(rng)),
@@ -607,6 +609,7 @@ fn gen_radio(rng: &mut Rng) -> Node {
 fn gen_slider(rng: &mut Rng) -> Node {
     Node::Slider {
         key: gen_key(rng),
+        label: rng.next_bool().then(|| gen_string(rng)),
         value: gen_f32(rng),
         min: gen_f32(rng),
         max: gen_f32(rng),
@@ -635,6 +638,7 @@ fn gen_pick_list(rng: &mut Rng) -> Node {
             .next_bool()
             .then(|| rng.next_range(2 * MAX_OPTIONS) as u32),
         placeholder: rng.next_bool().then(|| gen_string(rng)),
+        label: rng.next_bool().then(|| gen_string(rng)),
         on_select: rng.next_u64() as u32,
         width: gen_opt_length(rng),
         style: gen_pick_list_style(rng),
@@ -851,6 +855,21 @@ fn gen_tree(rng: &mut Rng, depth: usize, width: usize) -> Node {
             },
             5 => Node::MouseArea {
                 key: gen_key(rng),
+                role: rng.next_bool().then(|| {
+                    *rng.choose(&[
+                        Role::Button,
+                        Role::Link,
+                        Role::Tab,
+                        Role::MenuItem,
+                        Role::Row,
+                        Role::Checkbox,
+                        Role::Switch,
+                    ])
+                }),
+                label: rng.next_bool().then(|| gen_string(rng)),
+                expanded: rng.next_bool().then(|| rng.next_bool()),
+                selected: rng.next_bool().then(|| rng.next_bool()),
+                checked: rng.next_bool().then(|| rng.next_bool()),
                 on_press: rng.next_bool().then(|| rng.next_u64() as u32),
                 on_release: rng.next_bool().then(|| rng.next_u64() as u32),
                 on_double_click: None,
@@ -913,6 +932,7 @@ fn gen_tree(rng: &mut Rng, depth: usize, width: usize) -> Node {
             _ => Node::Button {
                 checked: rng.next_bool().then(|| rng.next_bool()),
                 expanded: rng.next_bool().then(|| rng.next_bool()),
+                selected: rng.next_bool().then(|| rng.next_bool()),
                 description: rng.next_bool().then(|| gen_string(rng)),
                 key: gen_key(rng),
                 content: ButtonContent::Child(Box::new(node)),
@@ -1612,7 +1632,13 @@ fn check_bounds(
             }
             check_bounds(content, depth + 1, keys, svg_bytes, ctx);
         }
-        Node::MouseArea { content, .. } | Node::ResizeHandle { content, .. } => {
+        Node::MouseArea { label, content, .. } => {
+            if let Some(label) = label {
+                check_string(label, ctx, "accessible label");
+            }
+            check_bounds(content, depth + 1, keys, svg_bytes, ctx);
+        }
+        Node::ResizeHandle { content, .. } => {
             check_bounds(content, depth + 1, keys, svg_bytes, ctx);
         }
         Node::Qr { code, .. } => {
@@ -1891,6 +1917,7 @@ fn check_bounds(
             }
         }
         Node::Slider {
+            label,
             value,
             min,
             max,
@@ -1900,6 +1927,9 @@ fn check_bounds(
             style,
             ..
         } => {
+            if let Some(label) = label {
+                check_string(label, ctx, "accessible label");
+            }
             for (number, field) in [(value, "value"), (min, "min"), (max, "max"), (step, "step")] {
                 check_finite(*number, ctx, field);
             }
@@ -1914,12 +1944,16 @@ fn check_bounds(
             options,
             selected,
             placeholder,
+            label,
             width,
             settings,
             ..
         } => {
             check_string(state_key, ctx, "combo state identity");
             check_string(placeholder, ctx, "combo placeholder");
+            if let Some(label) = label {
+                check_string(label, ctx, "accessible label");
+            }
             assert!(options.len() <= MAX_OPTIONS, "{ctx}: combo option budget");
             for option in options {
                 check_string(option, ctx, "combo option");
@@ -1941,10 +1975,14 @@ fn check_bounds(
             options,
             selected,
             placeholder,
+            label,
             width,
             style,
             ..
         } => {
+            if let Some(label) = label {
+                check_string(label, ctx, "accessible label");
+            }
             for face in [
                 &style.active,
                 &style.hovered,
@@ -2093,6 +2131,7 @@ fn check_bounds(
         Node::Editor {
             options,
             placeholder,
+            label,
             document,
             width,
             height,
@@ -2100,6 +2139,9 @@ fn check_bounds(
             max_height,
             ..
         } => {
+            if let Some(label) = label {
+                check_string(label, ctx, "accessible label");
+            }
             check_pixels(&options.padding, ctx, "editor padding");
             if let Some(size) = options.size {
                 assert!(size.is_finite() && size > 0.0 && size <= TEXT_PIXEL_BOUND);

@@ -693,6 +693,7 @@ fn control(
         label,
         checked: None,
         expanded: None,
+        selected: None,
         description: None,
         width: None,
         height: None,
