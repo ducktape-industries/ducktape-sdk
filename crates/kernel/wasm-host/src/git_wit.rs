@@ -60,7 +60,9 @@ fn diff_file(file: git_primitives::GitDiffFile) -> wit::GitDiffFile {
 
 fn diff_error(error: git_primitives::GitDiffError) -> wit::GitDiffError {
     match error {
-        git_primitives::GitDiffError::Unavailable(message) => wit::GitDiffError::Unavailable(message),
+        git_primitives::GitDiffError::Unavailable(message) => {
+            wit::GitDiffError::Unavailable(message)
+        }
         git_primitives::GitDiffError::Limit(message) => wit::GitDiffError::Limit(message),
         git_primitives::GitDiffError::Unsupported => wit::GitDiffError::Unsupported,
     }

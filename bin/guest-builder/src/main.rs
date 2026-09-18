@@ -221,7 +221,12 @@ fn build_guest(args: BuildArgs) -> Result<(), String> {
         let inputs = platform_inputs(&graph, &checkout, &platform.git)?;
         refuse_modified_sources(&platform.root, &inputs)?;
     }
-    build(&scratch, &module.name, kind, &remap_flags(&scratch, &graph)?)?;
+    build(
+        &scratch,
+        &module.name,
+        kind,
+        &remap_flags(&scratch, &graph)?,
+    )?;
 
     let cdylib = cdylib_path(&scratch, &module.name, kind);
     // artifact and lock travel together, wherever they land: the lock is the
@@ -539,7 +544,9 @@ fn sdk_pin_of(source: &str) -> Result<SdkPin, String> {
         None => (locator, String::new()),
         Some((url, query)) => {
             let Some((key, value)) = query.split_once('=') else {
-                return Err(format!("{MODULE_SDK}'s source reference is not key=value: {source}"));
+                return Err(format!(
+                    "{MODULE_SDK}'s source reference is not key=value: {source}"
+                ));
             };
             (url, format!(", {key} = {value:?}"))
         }
@@ -1099,10 +1106,7 @@ fn git_checkouts(graph: &serde_json::Value) -> Result<Vec<(String, String)>, Str
         else {
             return Err(format!("{} is not a cargo checkout", checkout.display()));
         };
-        checkouts.insert((
-            checkout.display().to_string(),
-            format!("/{}", repository.0),
-        ));
+        checkouts.insert((checkout.display().to_string(), format!("/{}", repository.0)));
     }
     Ok(checkouts.into_iter().collect())
 }
@@ -1385,7 +1389,8 @@ mod tests {
     /// must name the module by source alone and leave the revision to the lock.
     #[test]
     fn the_shell_names_the_module_by_source_alone() {
-        let manifest = member_manifest("chat", GuestKind::Component, &format!("git = {PLATFORM:?}"));
+        let manifest =
+            member_manifest("chat", GuestKind::Component, &format!("git = {PLATFORM:?}"));
         assert!(manifest.contains(
             "chat = { git = \"https://github.com/ducktape-industries/ducktape\", default-features = false, features = [\"guest\"] }"
         ));
@@ -1518,7 +1523,9 @@ dependencies = [
         assert!(inputs.contains(Path::new("crates/modules/apps/chat")));
         assert!(inputs.contains(Path::new("Cargo.lock")));
         assert!(
-            !inputs.iter().any(|path| path.starts_with("crates/module-sdk")),
+            !inputs
+                .iter()
+                .any(|path| path.starts_with("crates/module-sdk")),
             "{inputs:?}"
         );
     }
@@ -1747,7 +1754,11 @@ dependencies = [
             "module-sdk/Cargo.toml",
             "[package]\nname = \"ducktape-module-sdk\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
         );
-        fixture_file(root, "module-sdk/src/lib.rs", "pub const REVISION: u32 = 1;\n");
+        fixture_file(
+            root,
+            "module-sdk/src/lib.rs",
+            "pub const REVISION: u32 = 1;\n",
+        );
         for (directory, name, version) in [
             ("random02", "getrandom", "0.2.17"),
             ("random03", "getrandom", "0.3.4"),
@@ -1769,11 +1780,21 @@ dependencies = [
             &["-c", "commit.gpgsign=false", "commit", "-m", "The SDK"],
         );
         let pinned = git(root, &["rev-parse", "HEAD"]);
-        fixture_file(root, "module-sdk/src/lib.rs", "pub const REVISION: u32 = 2;\n");
+        fixture_file(
+            root,
+            "module-sdk/src/lib.rs",
+            "pub const REVISION: u32 = 2;\n",
+        );
         git(root, &["add", "."]);
         git(
             root,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "The SDK moves"],
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "The SDK moves",
+            ],
         );
         SdkPin {
             source: format!("git = \"file://{}\"", root.display()),
@@ -1916,9 +1937,11 @@ dependencies = [
             Some(pinned_sdk),
             "the guest's SDK is its host's revision, not the branch head"
         );
-        assert!(!fs::read_to_string(shell.join("component/Cargo.toml"))
-            .unwrap()
-            .contains("rev ="));
+        assert!(
+            !fs::read_to_string(shell.join("component/Cargo.toml"))
+                .unwrap()
+                .contains("rev =")
+        );
         run_command(Command::new(cargo()).current_dir(&shell).args([
             "check",
             "--locked",
@@ -1950,13 +1973,17 @@ dependencies = [
         }
         refuse_modified_sources(&repo, &inputs).unwrap();
         fixture_file(&repo, "shared/src/lib.rs", "pub fn value() -> u32 { 2 }\n");
-        assert!(refuse_modified_sources(&repo, &inputs)
-            .unwrap_err()
-            .contains("shared/src/lib.rs"));
+        assert!(
+            refuse_modified_sources(&repo, &inputs)
+                .unwrap_err()
+                .contains("shared/src/lib.rs")
+        );
         git(&repo, &["add", "shared/src/lib.rs"]);
-        assert!(refuse_modified_sources(&repo, &inputs)
-            .unwrap_err()
-            .contains("shared/src/lib.rs"));
+        assert!(
+            refuse_modified_sources(&repo, &inputs)
+                .unwrap_err()
+                .contains("shared/src/lib.rs")
+        );
         git(
             &repo,
             &[
@@ -1968,18 +1995,22 @@ dependencies = [
             ],
         );
         fixture_file(&repo, "shared/src/new.rs", "pub const VALUE: u32 = 3;\n");
-        assert!(refuse_modified_sources(&repo, &inputs)
-            .unwrap_err()
-            .contains("shared/src/new.rs"));
+        assert!(
+            refuse_modified_sources(&repo, &inputs)
+                .unwrap_err()
+                .contains("shared/src/new.rs")
+        );
         fs::remove_file(repo.join("shared/src/new.rs")).unwrap();
         fixture_file(
             &repo,
             ".cargo/config.toml",
             "[build]\nincremental = false\n",
         );
-        assert!(refuse_modified_sources(&repo, &inputs)
-            .unwrap_err()
-            .contains(".cargo/config.toml"));
+        assert!(
+            refuse_modified_sources(&repo, &inputs)
+                .unwrap_err()
+                .contains(".cargo/config.toml")
+        );
     }
 
     #[test]

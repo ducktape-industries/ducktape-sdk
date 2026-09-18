@@ -175,7 +175,10 @@ mod tests {
         );
         for epoch in ["", "0", "01", "+1", "-1", " 1", "1 ", "4294967296"] {
             assert!(
-                Manifest::parse(&format!("ducktape.view.manifest.v1\nSized\n\n\nnone\n{epoch}")).is_none(),
+                Manifest::parse(&format!(
+                    "ducktape.view.manifest.v1\nSized\n\n\nnone\n{epoch}"
+                ))
+                .is_none(),
                 "accepted {epoch:?}"
             );
         }

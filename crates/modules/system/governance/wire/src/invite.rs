@@ -145,7 +145,12 @@ mod tests {
         let token = mint(&issuer, BINDING);
 
         let proof = sign_join_proof(&redeemer, BINDING, &token);
-        assert!(verify_join_proof(&redeemer.public_key(), BINDING, &token, &proof));
+        assert!(verify_join_proof(
+            &redeemer.public_key(),
+            BINDING,
+            &token,
+            &proof
+        ));
         // the proof binds the KEY, not just the token.
         assert!(!verify_join_proof(
             &ed25519::PrivateKey::from_seed(3).public_key(),

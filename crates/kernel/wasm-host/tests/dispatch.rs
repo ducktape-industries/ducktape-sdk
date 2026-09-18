@@ -142,7 +142,11 @@ async fn snapshot_install_round_trip() {
     let mut trailing = bytes.clone();
     trailing.push(0);
     assert!(dst.install(&trailing, root).is_err());
-    assert_eq!(dst.root(), root, "failed installs left the target untouched");
+    assert_eq!(
+        dst.root(),
+        root,
+        "failed installs left the target untouched"
+    );
 }
 
 #[tokio::test]
@@ -193,7 +197,11 @@ async fn a_swap_to_another_backing_is_refused_and_keeps_the_running_code() {
     assert_eq!(m.root(), before, "the refused swap moved nothing");
     inc(&mut m, &mut ctx).await;
     m.commit_block().await.expect("commit");
-    assert_eq!(count(m.query(b"").await.expect("query")), 2, "the running code still runs");
+    assert_eq!(
+        count(m.query(b"").await.expect("query")),
+        2,
+        "the running code still runs"
+    );
 }
 
 /// THE READINESS PROBE MUST ACTUALLY LOAD. A validator signals `SwapReady` off
@@ -202,7 +210,8 @@ async fn a_swap_to_another_backing_is_refused_and_keeps_the_running_code() {
 /// runs the real compile + instantiate, not merely a look at the bytes.
 #[test]
 fn declared_shape_reads_a_real_component_and_refuses_garbage() {
-    let shape = WasmModule::declared_shape(HELLO).expect("the shipped fixture loads on this binary");
+    let shape =
+        WasmModule::declared_shape(HELLO).expect("the shipped fixture loads on this binary");
     assert_eq!(
         shape,
         Shape {

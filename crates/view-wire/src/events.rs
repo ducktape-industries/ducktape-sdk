@@ -81,7 +81,6 @@ impl Event {
         }
         Ok(())
     }
-
 }
 
 fn text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {

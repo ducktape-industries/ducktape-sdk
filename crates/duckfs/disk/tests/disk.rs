@@ -103,7 +103,10 @@ fn put_replaces_a_length_corrupt_existing_object() {
     let hex = to_hex(&id);
     let path = dir.join(&hex[..2]).join(&hex[2..]);
     std::fs::write(&path, b"xx").unwrap(); // truncate behind the store's back
-    assert!(odb.get(&id).is_err(), "the truncated object reads as corrupt");
+    assert!(
+        odb.get(&id).is_err(),
+        "the truncated object reads as corrupt"
+    );
 
     // re-put the correct bytes: put REPLACES the corrupt file rather than no-op.
     let id2 = odb.put(Kind::Chunk, b"bytes").unwrap();

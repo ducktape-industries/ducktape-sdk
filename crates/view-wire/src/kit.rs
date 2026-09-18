@@ -470,7 +470,10 @@ pub fn badge(key: impl Into<String>, content: impl Into<String>, tone: Tone) -> 
         key.clone(),
         nowrap(weighted(
             colored(
-                text_size(text(format!("{key}/text"), content), type_scale::CAPTION as f32),
+                text_size(
+                    text(format!("{key}/text"), content),
+                    type_scale::CAPTION as f32,
+                ),
                 tone.color(p),
             ),
             wire::Weight::Medium,
@@ -596,7 +599,10 @@ pub fn empty_state(
 /// A form field: label over the control, a hint under it.
 pub fn field(key: impl Into<String>, name: impl Into<String>, control: Node) -> Node {
     let key = key.into();
-    spaced(column(key.clone(), [label(format!("{key}/label"), name), control]), 6.)
+    spaced(
+        column(key.clone(), [label(format!("{key}/label"), name), control]),
+        6.,
+    )
 }
 
 /// A row of section switches: the chosen one is checked.
@@ -606,12 +612,7 @@ pub fn tabs(
 ) -> Node {
     let key = key.into();
     let buttons = choices.into_iter().map(|(id, name, chosen, on_press)| {
-        let mut button = button(
-            format!("{key}/{id}"),
-            name,
-            on_press,
-            ButtonPreset::Subtle,
-        );
+        let mut button = button(format!("{key}/{id}"), name, on_press, ButtonPreset::Subtle);
         let Node::Button { checked, .. } = &mut button else {
             unreachable!()
         };
@@ -623,12 +624,7 @@ pub fn tabs(
 
 /// A row in a list pane: the whole row presses, and the chosen one is
 /// checked so the native kit paints its selection.
-pub fn list_row(
-    key: impl Into<String>,
-    child: Node,
-    chosen: bool,
-    on_press: Option<u32>,
-) -> Node {
+pub fn list_row(key: impl Into<String>, child: Node, chosen: bool, on_press: Option<u32>) -> Node {
     let mut button = button_child(key, child, on_press, ButtonPreset::Subtle);
     let Node::Button {
         checked,

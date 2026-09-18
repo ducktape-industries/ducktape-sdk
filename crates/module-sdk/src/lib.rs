@@ -67,7 +67,7 @@ pub mod bindings {
 // module authored outside this repository pins ONE crate and reaches the
 // module contract (`sdk::Module`, `sdk::Ctx`, the codecs) through it.
 pub use bindings::ducktape::module::host;
-pub use bindings::{Guest, export_module};
+pub use bindings::{export_module, Guest};
 pub use sdk;
 
 // ============================================================================
@@ -118,7 +118,7 @@ pub fn git_shape() -> host::ModuleShape {
 
 use sdk::{
     Ack, CallId, Cause, Ctx, DeliveryOutcome, Env, Error, Event, Hop, ItemRef, MerkleStore, Msg,
-    Origin, PendingItem, ROOT_LEN, ResolverSyncTarget, Root, StateRoot,
+    Origin, PendingItem, ResolverSyncTarget, Root, StateRoot, ROOT_LEN,
 };
 
 use std::future::Future;

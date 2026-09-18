@@ -620,21 +620,31 @@ pub enum PageQuery {
     /// cross-module resolution surface; the returned block carries its `page`
     /// and `parent`, so a resolver learns where the block lives, not just
     /// what it says.
-    GetBlock { block_id: String },
+    GetBlock {
+        block_id: String,
+    },
     /// The target and comment count, without reading comment bodies.
-    CommentThreadHead { thread_id: String },
+    CommentThreadHead {
+        thread_id: String,
+    },
     /// one thread with its live comments.
-    CommentThread { thread_id: String },
+    CommentThread {
+        thread_id: String,
+    },
     /// one comment by id, tombstones included — the existence probe a module
     /// emitting `AddComment` follow-ups uses (comment ids are client-minted,
     /// so a squatted id would otherwise reject the follow-up and abort its
     /// block). `None` == no comment record at that id.
-    GetComment { comment_id: String },
+    GetComment {
+        comment_id: String,
+    },
     /// how many threads anchor to one target — the [`MAX_THREADS_PER_TARGET`]
     /// cap probe a module staging `AddComment` follow-ups runs. a count off
     /// the target's thread-index record, deliberately NOT the thread views
     /// (those are the index guest's `threads_for_targets`).
-    TargetThreadCount { target: String },
+    TargetThreadCount {
+        target: String,
+    },
     /// how many pages the enumeration index holds — the [`MAX_PAGES`] cap
     /// probe a module staging a `CreatePage` follow-up runs, so a refused
     /// create never aborts the block that carries it.

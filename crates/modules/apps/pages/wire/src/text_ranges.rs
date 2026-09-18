@@ -99,10 +99,7 @@ fn normalize(marks: &mut Vec<SpanMark>) {
     *marks = out;
 }
 
-pub fn validate_marks(
-    text: &str,
-    mut marks: Vec<SpanMark>,
-) -> Result<Vec<SpanMark>, PageError> {
+pub fn validate_marks(text: &str, mut marks: Vec<SpanMark>) -> Result<Vec<SpanMark>, PageError> {
     if marks
         .iter()
         .any(|mark| !valid_range(text, mark.start, mark.end))
