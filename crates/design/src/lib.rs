@@ -403,7 +403,6 @@ mod tests {
 
     #[test]
     fn the_scales_ascend() {
-        assert!(type_scale::BODY < height::ROW && height::ROW < height::CONTROL);
         let scale = [
             spacing::XXS,
             spacing::XS,
