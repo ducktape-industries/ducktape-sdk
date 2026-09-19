@@ -9,7 +9,7 @@
 //!   streams straight off one scan, and a label's newest live seq is the
 //!   first posting under its prefix.
 //! - `tagcat/{encoded-channel}/{label}` / `tagcat/g/{label}` — [`TagCat`]
-//!   count and last sequence, mirrored by the count-ranked `tagrank/` marker.
+//!   live count, mirrored by the count-ranked `tagrank/` marker.
 //!
 //! extraction grammar (see the design doc): `#` + 1..=64 chars of Unicode
 //! letters/digits/`_`/`-`, opened only at start-of-text or
@@ -341,13 +341,12 @@ pub(super) fn serve_tags(
             Some(channel) => tag_channel_prefix(label, channel),
             None => tag_prefix(label),
         };
-        let last_seq = read
-            .scan_page(posting_prefix.as_bytes(), None, 1)
+        let posting = read.scan_page(posting_prefix.as_bytes(), None, 1);
+        let (_, value) = posting
             .entries
             .first()
-            .map(|(_, value)| decode_tok(value).map(|posting| posting.seq))
-            .transpose()?
-            .unwrap_or(0);
+            .ok_or_else(|| Fail::new(FAIL_ROW_DECODE, "tag catalog has no posting"))?;
+        let last_seq = decode_tok(value)?.seq;
         out.push(TagRow {
             tag: label.into(),
             count: cat.count,

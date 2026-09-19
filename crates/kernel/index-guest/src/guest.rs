@@ -13,6 +13,8 @@
 /// silent until that one target is turned up — never a result channel.
 pub use fluent_guest::{Change, Scan, errno, log};
 
+pub use crate::FAIL_WRITE_REFUSED;
+
 #[doc(hidden)]
 pub use fluent_guest::__entry;
 
@@ -29,14 +31,6 @@ pub const FAIL_FEED_DELETE: i32 = 10;
 pub const FAIL_ROW_DECODE: i32 = 11;
 /// [`Fail`] code: a value-elided op row was not readable from state.
 pub const FAIL_ROW_MISSING: i32 = 12;
-/// [`Fail`] code: the engine refused a derived write (errno in the message).
-pub const FAIL_WRITE_REFUSED: i32 = 13;
-
-/// reject an oversized staged value before the guest can call the host.
-pub fn validate_value_size(value: &[u8]) -> Result<(), Fail> {
-    crate::validate_store_value(value)
-}
-
 /// ducktape's [`Fail`] crossing into the engine SDK at the entry boundary —
 /// the one place the two vocabularies meet.
 impl From<Fail> for fluent_guest::Fail {
@@ -101,7 +95,7 @@ impl StateRead for EngineRead {
 pub fn apply(writes: Writes) -> Result<(), Fail> {
     for (_, cmd) in &writes {
         if let Some(value) = cmd {
-            validate_value_size(value)?;
+            crate::validate_store_value(value)?;
         }
     }
     for (key, cmd) in writes {
@@ -117,17 +111,6 @@ pub fn apply(writes: Writes) -> Result<(), Fail> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_value_size;
-
-    #[test]
-    fn derived_value_cap_is_exact() {
-        assert!(validate_value_size(&vec![0; sdk::MAX_STORE_VALUE_BYTES]).is_ok());
-        assert!(validate_value_size(&vec![0; sdk::MAX_STORE_VALUE_BYTES + 1]).is_err());
-    }
 }
 
 /// run one fold batch and record its tip under [`FOLD_TIP`] — the shared

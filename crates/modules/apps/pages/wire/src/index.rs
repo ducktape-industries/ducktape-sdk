@@ -167,8 +167,6 @@ pub struct ThreadRow {
     pub resolved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_by: Option<String>,
-    pub comment_count: u64,
-    pub live_comment_count: u64,
 }
 
 /// one comment of a thread; `deleted` tombstones content but keeps order.
@@ -526,7 +524,13 @@ fn put_page(out: &mut Writes, row: &PageRow) -> Result<(), Fail> {
     Ok(())
 }
 
-fn read_thread(read: &impl StateRead, thread_id: &str) -> Result<Option<ThreadRow>, Fail> {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredThread {
+    thread: ThreadRow,
+    live_comment_count: u64,
+}
+
+fn read_thread(read: &impl StateRead, thread_id: &str) -> Result<Option<StoredThread>, Fail> {
     let Some(bytes) = read.get(cthread_key(thread_id).as_bytes()) else {
         return Ok(None);
     };
@@ -535,9 +539,9 @@ fn read_thread(read: &impl StateRead, thread_id: &str) -> Result<Option<ThreadRo
         .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
 }
 
-fn put_thread(out: &mut Writes, row: &ThreadRow) -> Result<(), Fail> {
+fn put_thread(out: &mut Writes, row: &StoredThread) -> Result<(), Fail> {
     let bytes = serde_json::to_vec(row).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?;
-    index_guest::put(out, cthread_key(&row.id), bytes);
+    index_guest::put(out, cthread_key(&row.thread.id), bytes);
     Ok(())
 }
 
@@ -588,15 +592,15 @@ fn thread_of_comment(
         return Ok(None);
     };
     Ok(Some(ThreadComment {
-        thread,
+        thread: thread.thread,
         comment: record.comment,
     }))
 }
 
 /// drop a whole thread — row, target marker, and comment pointers.
-fn delete_thread(out: &mut Writes, thread: &ThreadRow) {
-    index_guest::delete(out, ctgt_key(&thread.target, &thread.id));
-    index_guest::delete(out, cthread_key(&thread.id));
+fn delete_thread(out: &mut Writes, thread: &StoredThread) {
+    index_guest::delete(out, ctgt_key(&thread.thread.target, &thread.thread.id));
+    index_guest::delete(out, cthread_key(&thread.thread.id));
 }
 
 fn delete_thread_comments(read: &impl StateRead, out: &mut Writes, thread_id: &str) {
@@ -978,7 +982,6 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
             let marker = ctm_key(&thread_id, op.height, op.seq, &comment_id);
             let thread = match read_thread(read, &thread_id)? {
                 Some(mut thread) => {
-                    thread.comment_count += 1;
                     thread.live_comment_count += 1;
                     thread
                 }
@@ -986,15 +989,16 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
                     // a fresh thread: the opener is this comment's author and
                     // the target marker makes it scannable per target.
                     index_guest::put(&mut out, ctgt_key(&target, &thread_id), Vec::new());
-                    ThreadRow {
-                        id: thread_id.clone(),
-                        target,
-                        opener: author,
-                        created_at: op.time,
-                        anchor,
-                        resolved: false,
-                        resolved_by: None,
-                        comment_count: 1,
+                    StoredThread {
+                        thread: ThreadRow {
+                            id: thread_id.clone(),
+                            target,
+                            opener: author,
+                            created_at: op.time,
+                            anchor,
+                            resolved: false,
+                            resolved_by: None,
+                        },
                         live_comment_count: 1,
                     }
                 }
@@ -1010,10 +1014,10 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
             let Some(mut thread) = read_thread(read, &thread_id)? else {
                 return Ok(out);
             };
-            index_guest::delete(&mut out, ctgt_key(&thread.target, &thread.id));
-            index_guest::put(&mut out, ctgt_key(&target, &thread.id), Vec::new());
-            thread.target = target;
-            thread.anchor = anchor;
+            index_guest::delete(&mut out, ctgt_key(&thread.thread.target, &thread.thread.id));
+            index_guest::put(&mut out, ctgt_key(&target, &thread.thread.id), Vec::new());
+            thread.thread.target = target;
+            thread.thread.anchor = anchor;
             put_thread(&mut out, &thread)?;
         }
         PageMsg::EditComment {
@@ -1028,8 +1032,7 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
             let mut comment = record.comment;
             comment.text = text;
             comment.edited_at = Some(op.time);
-            put_comment(&mut out, &thread.id, &comment, &record.marker)?;
-            put_thread(&mut out, &thread)?;
+            put_comment(&mut out, &thread.thread.id, &comment, &record.marker)?;
         }
         PageMsg::DeleteComment { comment_id } => {
             let Some(record) = read_comment(read, &comment_id)? else {
@@ -1047,11 +1050,11 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
             // the module removes the whole thread record when its last live
             // comment tombstones — mirror that.
             if thread.live_comment_count <= 1 {
-                delete_thread_comments(read, &mut out, &thread.id);
+                delete_thread_comments(read, &mut out, &thread.thread.id);
                 delete_thread(&mut out, &thread);
             } else {
                 thread.live_comment_count -= 1;
-                put_comment(&mut out, &thread.id, &comment, &record.marker)?;
+                put_comment(&mut out, &thread.thread.id, &comment, &record.marker)?;
                 put_thread(&mut out, &thread)?;
             }
         }
@@ -1062,8 +1065,8 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
             let Some(mut thread) = read_thread(read, &thread_id)? else {
                 return Ok(out);
             };
-            thread.resolved = resolved;
-            thread.resolved_by = resolved.then(|| render_author(&actor));
+            thread.thread.resolved = resolved;
+            thread.thread.resolved_by = resolved.then(|| render_author(&actor));
             put_thread(&mut out, &thread)?;
         }
     }
@@ -1130,11 +1133,11 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
 
 fn thread_page(
     read: &impl StateRead,
-    thread: ThreadRow,
+    thread: StoredThread,
     after: Option<String>,
     limit: u16,
 ) -> Result<ThreadPage, Fail> {
-    let prefix = ctm_prefix(&thread.id);
+    let prefix = ctm_prefix(&thread.thread.id);
     let after_key = cursor_key(read, after.as_deref(), &prefix)?;
     let opener_page = read.scan_page(prefix.as_bytes(), None, 1);
     let (_, opener_bytes) = opener_page
@@ -1145,7 +1148,7 @@ fn thread_page(
         .map_err(|_| Fail::new(FAIL_ROW_DECODE, "comment marker is not utf-8"))?;
     let opener_record = read_comment(read, &opener_id)?
         .ok_or_else(|| Fail::new(FAIL_ROW_DECODE, "thread opener is missing"))?;
-    if opener_record.thread_id != thread.id {
+    if opener_record.thread_id != thread.thread.id {
         return Err(Fail::new(
             FAIL_ROW_DECODE,
             "thread opener points outside thread",
@@ -1160,7 +1163,7 @@ fn thread_page(
     let mut comments = Vec::new();
     for (key, _) in &page.entries {
         let marker = String::from_utf8_lossy(key);
-        let Some(comment_id) = page_comment_id(read, &marker, &thread.id)? else {
+        let Some(comment_id) = page_comment_id(read, &marker, &thread.thread.id)? else {
             continue;
         };
         if comment_id != opener_id && !comment_id.is_empty() {
@@ -1177,7 +1180,7 @@ fn thread_page(
         .flatten();
     let comment_count = thread.live_comment_count;
     Ok(ThreadPage {
-        thread,
+        thread: thread.thread,
         opener: opener_record.comment,
         comments,
         comment_count,
@@ -2072,6 +2075,9 @@ mod tests {
         let texts: Vec<&str> = t1.comments.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, ["second"]);
         assert_eq!(t1.comment_count, 2);
+        let wire = serde_json::to_value(t1).unwrap();
+        assert!(wire["thread"].get("comment_count").is_none());
+        assert!(wire["thread"].get("live_comment_count").is_none());
 
         // a tombstone stays indexed for cursor progress but is omitted from
         // the live comment page; edits and resolution fold in place.
