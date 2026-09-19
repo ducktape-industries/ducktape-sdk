@@ -1115,19 +1115,23 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
             if tokens.is_empty() {
                 return Err(Fail::new(FAIL_BAD_REQUEST, "search text has no tokens"));
             }
-            // each token matches as a prefix; the channel scope filters the
-            // intersected refs by their stored channel (postings can't embed
-            // it after a partial token).
-            let mut refs: Vec<TokRef> =
-                search::intersect_prefix(read, "tok/", &tokens, DEFAULT_POSTING_CAP)
-                    .into_iter()
-                    .filter_map(|hit| serde_json::from_slice(&hit.value).ok())
-                    .filter(|r: &TokRef| channel_id.as_ref().is_none_or(|c| &r.channel_id == c))
-                    .collect();
-            // newest first; (channel, seq) tiebreak for a stable order.
-            refs.sort_by(|a, b| {
-                (b.time, &b.channel_id, b.seq).cmp(&(a.time, &a.channel_id, a.seq))
-            });
+            // each token matches as a prefix, so a partial token can't embed
+            // the channel in the scan prefix: the channel scope goes into the
+            // intersection as a predicate instead, where it is applied before
+            // the cap. newest first, (channel, seq) tiebreak for a stable order.
+            let found =
+                search::intersect_prefix(read, "tok/", &tokens, DEFAULT_POSTING_CAP, |value| {
+                    let r: TokRef = serde_json::from_slice(value).ok()?;
+                    channel_id
+                        .as_ref()
+                        .is_none_or(|c| &r.channel_id == c)
+                        .then_some((r.time, r.channel_id, r.seq))
+                });
+            let refs: Vec<TokRef> = found
+                .hits
+                .iter()
+                .filter_map(|hit| serde_json::from_slice(&hit.value).ok())
+                .collect();
             let limit = limit
                 .unwrap_or(DEFAULT_SEARCH_LIMIT)
                 .clamp(1, MAX_SEARCH_LIMIT);

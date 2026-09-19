@@ -1200,16 +1200,24 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
             if tokens.is_empty() {
                 return Err(Fail::new(FAIL_BAD_REQUEST, "search text has no tokens"));
             }
-            // each token matches as a prefix (search-as-you-type). block ids
-            // are global, so postings carry no page segment — the page filter
-            // applies to the intersected refs instead.
-            let mut refs: Vec<TokRef> =
-                search::intersect_prefix(read, "tok/", &tokens, DEFAULT_POSTING_CAP)
-                    .into_iter()
-                    .filter_map(|hit| serde_json::from_slice(&hit.value).ok())
-                    .filter(|r: &TokRef| page_id.as_ref().is_none_or(|p| &r.page_id == p))
-                    .collect();
-            refs.sort_by(|a, b| (b.time, &b.block_id).cmp(&(a.time, &a.block_id)));
+            // each token matches as a prefix (search-as-you-type), and block
+            // ids are global, so postings carry no page segment to scan by:
+            // the page restriction goes into the intersection as a predicate,
+            // where it is applied before the cap. newest first, block id
+            // tiebreak for a stable order.
+            let found =
+                search::intersect_prefix(read, "tok/", &tokens, DEFAULT_POSTING_CAP, |value| {
+                    let r: TokRef = serde_json::from_slice(value).ok()?;
+                    page_id
+                        .as_ref()
+                        .is_none_or(|p| &r.page_id == p)
+                        .then_some((r.time, r.block_id))
+                });
+            let refs: Vec<TokRef> = found
+                .hits
+                .iter()
+                .filter_map(|hit| serde_json::from_slice(&hit.value).ok())
+                .collect();
             let limit = limit
                 .unwrap_or(DEFAULT_SEARCH_LIMIT)
                 .clamp(1, MAX_SEARCH_LIMIT);
@@ -1884,6 +1892,63 @@ mod tests {
         assert!(
             serve_view(&map, &req).is_err(),
             "an over-cap grouped read must refuse"
+        );
+    }
+
+    /// seed one block row and its `shared` posting straight into the map: the
+    /// fold path is covered above, and this test needs more postings on ONE
+    /// token than [`DEFAULT_POSTING_CAP`] — cheaper to write than to fold.
+    fn posting(map: &mut Map, page_id: &str, block_id: &str, time: u64) {
+        let row = PageBlockRow {
+            author: crate::Party::Key(b"jess".to_vec()),
+            block_id: block_id.into(),
+            page_id: page_id.into(),
+            parent: Some(page_id.into()),
+            kind: BlockKind::Paragraph,
+            text: "shared".into(),
+            marks: Vec::new(),
+            checked: false,
+            children: Vec::new(),
+            height: 1,
+            time,
+        };
+        let tok = TokRef {
+            block_id: block_id.into(),
+            page_id: page_id.into(),
+            time,
+        };
+        map.insert(
+            blk_key(block_id).into_bytes(),
+            serde_json::to_vec(&row).unwrap(),
+        );
+        map.insert(
+            tok_key("shared", block_id).into_bytes(),
+            serde_json::to_vec(&tok).unwrap(),
+        );
+    }
+
+    #[test]
+    fn a_page_scoped_search_keeps_its_hits_when_another_page_floods_the_token() {
+        let mut map = Map::new();
+        // one crowded page whose postings sort FIRST in key order and carry the
+        // newest times: capping before the page filter would spend the whole
+        // budget on them and answer "nothing on p".
+        for i in 0..=DEFAULT_POSTING_CAP {
+            posting(&mut map, "other", &format!("o{i:05}"), 9_000 + i as u64);
+        }
+        for (i, id) in ["p001", "p002", "p003"].iter().enumerate() {
+            posting(&mut map, "p", id, 100 + i as u64);
+        }
+
+        let hits = search(
+            &map,
+            serde_json::json!({"search": {"text": "shared", "page_id": "p"}}),
+        );
+        let ids: Vec<&str> = hits.iter().map(|h| h.block_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["p003", "p002", "p001"],
+            "every in-page hit, newest first"
         );
     }
 }

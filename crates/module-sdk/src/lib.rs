@@ -399,6 +399,11 @@ impl MerkleStore for WitStore {
         &mut self,
         writes: Vec<([u8; ROOT_LEN], Option<Vec<u8>>)>,
     ) -> Result<(), Error> {
+        // the whole batch is checked before ANY of it is staged: refusing
+        // half-way would stage a record set no caller asked to commit.
+        for value in writes.iter().filter_map(|(_, value)| value.as_deref()) {
+            fits_store_value("a staged record", value.len())?;
+        }
         for (key, value) in writes {
             match value {
                 Some(value) => host::state_set(&key, &value),
@@ -592,10 +597,36 @@ pub fn load_store_state() -> Option<(Vec<u8>, [u8; ROOT_LEN])> {
 }
 
 /// the [`save_state`] twin for STORE-BACKED tenants — the same OUTER staging,
-/// under the two digest keys [`load_store_state`] reads.
-pub fn save_store_state(bytes: &[u8], root: &[u8; ROOT_LEN]) {
+/// under the two digest keys [`load_store_state`] reads. fallible where its
+/// twin is not: these two keys live in the backing merkle store, so the
+/// snapshot answers to [`fits_store_value`] like any other record.
+pub fn save_store_state(bytes: &[u8], root: &[u8; ROOT_LEN]) -> Result<(), host::Error> {
+    // before the first write: a refused snapshot leaves the staged pair as it
+    // was, where a half-written one would be the torn state `load_store_state`
+    // panics on. the root is fixed-width, so only the bytes can exceed.
+    fits_store_value("the module snapshot", bytes.len()).map_err(error_to_wit)?;
     host::state_set(&sdk::store_key(STATE_KEY), bytes);
     host::state_set(&sdk::store_key(ROOT_KEY), root);
+    Ok(())
+}
+
+/// refuse a record the backing store could not read back. the qmdb journal
+/// codec decodes at most [`sdk::MAX_STORE_VALUE_BYTES`], so a larger value
+/// commits and is then unreadable by the store's own op codec (and unsyncable)
+/// — a loss no later dispatch can undo. checked BEFORE the write, so the guest
+/// refuses with [`sdk::refusal::CAPACITY`] and the block keeps a state every
+/// validator can still read.
+fn fits_store_value(what: &str, len: usize) -> Result<(), Error> {
+    if len <= sdk::MAX_STORE_VALUE_BYTES {
+        return Ok(());
+    }
+    Err(Error::module(
+        sdk::refusal::CAPACITY,
+        format!(
+            "{what} is {len} bytes; the store reads back at most {} bytes",
+            sdk::MAX_STORE_VALUE_BYTES
+        ),
+    ))
 }
 
 // ============================================================================
@@ -983,4 +1014,29 @@ macro_rules! store_guest {
 
         $crate::export_module!(Component);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// the whole point of the check: the guest refuses a record the store
+    /// could not read back, and accepts one exactly at the bound.
+    #[test]
+    fn a_record_over_the_store_bound_is_refused_for_capacity() {
+        fits_store_value("the module snapshot", sdk::MAX_STORE_VALUE_BYTES)
+            .expect("exactly the bound reads back");
+
+        let over = sdk::MAX_STORE_VALUE_BYTES + 1;
+        let Err(Error::Module { reason, sentence }) = fits_store_value("the module snapshot", over)
+        else {
+            panic!("a record past the bound must be refused, not written");
+        };
+        assert_eq!(reason, sdk::refusal::CAPACITY);
+        assert!(
+            sentence.contains(&over.to_string())
+                && sentence.contains(&sdk::MAX_STORE_VALUE_BYTES.to_string()),
+            "the sentence names the size and the bound: {sentence}"
+        );
+    }
 }
