@@ -13,6 +13,8 @@
 /// silent until that one target is turned up — never a result channel.
 pub use fluent_guest::{Change, Scan, errno, log};
 
+pub use crate::FAIL_WRITE_REFUSED;
+
 #[doc(hidden)]
 pub use fluent_guest::__entry;
 
@@ -29,9 +31,6 @@ pub const FAIL_FEED_DELETE: i32 = 10;
 pub const FAIL_ROW_DECODE: i32 = 11;
 /// [`Fail`] code: a value-elided op row was not readable from state.
 pub const FAIL_ROW_MISSING: i32 = 12;
-/// [`Fail`] code: the engine refused a derived write (errno in the message).
-pub const FAIL_WRITE_REFUSED: i32 = 13;
-
 /// ducktape's [`Fail`] crossing into the engine SDK at the entry boundary —
 /// the one place the two vocabularies meet.
 impl From<Fail> for fluent_guest::Fail {
@@ -94,6 +93,11 @@ impl StateRead for EngineRead {
 /// apply decided writes through the engine, in command order, inside the
 /// current transaction.
 pub fn apply(writes: Writes) -> Result<(), Fail> {
+    for (_, cmd) in &writes {
+        if let Some(value) = cmd {
+            crate::validate_store_value(value)?;
+        }
+    }
     for (key, cmd) in writes {
         let refused = match cmd {
             Some(value) => fluent_guest::put(key.as_bytes(), &value).err(),

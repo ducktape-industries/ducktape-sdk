@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    ChatViewReply, MsgRow, TagRow, fold_op, msg_key, read_row, read_u64, seq_key, serve_view, tags,
+    ChatViewReply, MsgRow, TagPage, TagRow, fold_op, msg_key, read_row, read_u64, seq_key,
+    serve_view, tags,
 };
 use crate::{Block, ChatAssigned, ChatMsg, Span, encode_assigned, encode_msg};
 use index_guest::{OpRow, OriginTag, apply_to_map};
@@ -89,10 +90,26 @@ fn fold(map: &mut Map, height: u64, msg: &ChatMsg) {
     apply_to_map(map, writes);
 }
 
+fn with_viewer(mut req: serde_json::Value) -> serde_json::Value {
+    if let Some(root) = req.as_object_mut() {
+        for name in ["search", "tag_search"] {
+            if let Some(body) = root
+                .get_mut(name)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                body.entry("viewer_handles")
+                    .or_insert_with(|| serde_json::json!(["user:jess"]));
+            }
+        }
+    }
+    req
+}
+
 fn hits(map: &Map, req: serde_json::Value) -> Vec<MsgRow> {
-    let bytes = serve_view(map, &serde_json::to_vec(&req).unwrap()).expect("view");
+    let bytes = serve_view(map, &serde_json::to_vec(&with_viewer(req)).unwrap()).expect("view");
     match serde_json::from_slice(&bytes).expect("reply decodes") {
-        ChatViewReply::Hits(hits) => hits,
+        ChatViewReply::Hits(super::MessageHits { hits, .. })
+        | ChatViewReply::TagHits(super::TagPage { hits, .. }) => hits,
         other => panic!("expected hits, got {other:?}"),
     }
 }
@@ -100,7 +117,19 @@ fn hits(map: &Map, req: serde_json::Value) -> Vec<MsgRow> {
 fn tag_rows(map: &Map, req: serde_json::Value) -> Vec<TagRow> {
     let bytes = serve_view(map, &serde_json::to_vec(&req).unwrap()).expect("view");
     match serde_json::from_slice(&bytes).expect("reply decodes") {
-        ChatViewReply::Tags(rows) => rows,
+        ChatViewReply::Tags { tags, .. } => tags,
+        other => panic!("expected tags, got {other:?}"),
+    }
+}
+
+fn tag_page(map: &Map, req: serde_json::Value) -> (Vec<TagRow>, bool, Option<String>) {
+    let bytes = serve_view(map, &serde_json::to_vec(&req).unwrap()).expect("view");
+    match serde_json::from_slice(&bytes).expect("reply decodes") {
+        ChatViewReply::Tags {
+            tags,
+            has_more,
+            next_after,
+        } => (tags, has_more, next_after),
         other => panic!("expected tags, got {other:?}"),
     }
 }
@@ -136,12 +165,12 @@ fn posts_index_tags_and_catalog() {
         ]
     );
 
-    // no channel aggregates counts across channels; last_seq is the max of
-    // the per-channel newest (seq spaces are per-channel).
+    // no channel aggregates counts across channels; last_seq comes from the
+    // one newest posting lookup (seq spaces are per-channel).
     let rows = tag_rows(&map, serde_json::json!({"tags": {}}));
     assert_eq!(rows[0].tag, "rust");
     assert_eq!(rows[0].count, 3);
-    assert_eq!(rows[0].last_seq, 2);
+    assert_eq!(rows[0].last_seq, 1);
 
     // tag search: exact label, newest first, channel scope honored.
     let all = hits(&map, serde_json::json!({"tag_search": {"tag": "rust"}}));
@@ -153,6 +182,65 @@ fn posts_index_tags_and_catalog() {
     assert_eq!(ids(&scoped), ["m2", "m1"]);
     // rows carry their tag sets.
     assert_eq!(scoped[0].tags, ["rust", "wasm"]);
+}
+
+#[test]
+fn tag_catalog_and_search_are_cursor_pages_and_encoded_scopes_do_not_bleed() {
+    let mut map = Map::new();
+    fold(&mut map, 1, &post("g", "m1", "#alpha"));
+    fold(&mut map, 2, &post("g/a", "m2", "#alpha"));
+    fold(&mut map, 3, &post("g", "m3", "#alpha"));
+    fold(&mut map, 4, &post("g", "m4", "#beta"));
+
+    let (first, has_more, after) = tag_page(
+        &map,
+        serde_json::json!({"tags": {"channel_id": "g", "limit": 1}}),
+    );
+    assert_eq!(first[0].tag, "alpha");
+    assert!(has_more);
+    let (second, has_more, after) = tag_page(
+        &map,
+        serde_json::json!({"tags": {
+            "channel_id": "g", "limit": 1, "after": after
+        }}),
+    );
+    assert_eq!(second[0].tag, "beta");
+    assert!(!has_more);
+    assert!(after.is_none());
+
+    let bytes = serve_view(
+        &map,
+        &serde_json::to_vec(&serde_json::json!({
+            "tag_search": {"tag": "alpha", "channel_id": "g", "limit": 1,
+                "viewer_handles": ["user:jess"]}
+        }))
+        .unwrap(),
+    )
+    .expect("tag search");
+    let ChatViewReply::TagHits(TagPage {
+        hits,
+        has_more,
+        next_after,
+    }) = serde_json::from_slice(&bytes).unwrap()
+    else {
+        panic!("expected tag page")
+    };
+    assert_eq!(ids(&hits), ["m3"]);
+    assert!(has_more);
+    let bytes = serve_view(
+        &map,
+        &serde_json::to_vec(&serde_json::json!({"tag_search": {
+            "tag": "alpha", "channel_id": "g", "limit": 1,
+            "after": next_after, "viewer_handles": ["user:jess"]
+        }}))
+        .unwrap(),
+    )
+    .expect("tag continuation");
+    let ChatViewReply::TagHits(TagPage { hits, .. }) = serde_json::from_slice(&bytes).unwrap()
+    else {
+        panic!("expected tag continuation")
+    };
+    assert_eq!(ids(&hits), ["m1"]);
 }
 
 #[test]
@@ -384,12 +472,25 @@ fn invalid_tag_queries_are_view_errors() {
     fold(&mut map, 1, &post("g", "m1", "#ok"));
     let long = "a".repeat(65);
     for bad in ["", "#", "two words", long.as_str()] {
-        let req = serde_json::json!({"tag_search": {"tag": bad}});
+        let req = with_viewer(serde_json::json!({"tag_search": {"tag": bad}}));
         let err = serve_view(&map, &serde_json::to_vec(&req).unwrap()).unwrap_err();
         assert!(
             err.message.contains("not a valid tag"),
             "tag {bad:?} should be a view error, got {err:?}"
         );
+    }
+}
+
+#[test]
+fn tag_catalog_rejects_malformed_same_scope_rank_cursors() {
+    let map = Map::new();
+    for after in [
+        "tagrank/c/67/not-a-count/alpha",
+        "tagrank/c/67/fffffffffffffffe/Alpha",
+    ] {
+        let req = serde_json::json!({"tags": {"channel_id": "g", "after": after}});
+        let err = serve_view(&map, &serde_json::to_vec(&req).unwrap()).unwrap_err();
+        assert_eq!(err.code, super::FAIL_BAD_REQUEST);
     }
 }
 

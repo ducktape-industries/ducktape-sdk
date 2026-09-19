@@ -542,12 +542,19 @@ pub struct Comment {
     pub deleted: bool,
 }
 
-/// a thread plus its live (non-tombstoned) comments in order.
+/// a thread plus one cursor page of live (non-tombstoned) comments in order.
+/// The canonical query treats `after` as an exclusive comment id: it must
+/// name an id in this thread or the request is `INVALID_INPUT`. Its raw
+/// `comment_ids` scan budget includes tombstones; `next_after` is the last
+/// scanned id only when more ids remain.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadView {
     pub thread: Thread,
     pub comments: Vec<Comment>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
 }
 
 /// The authenticated actor resolved by the module for this applied operation.
@@ -629,9 +636,16 @@ pub enum PageQuery {
     CommentThreadHead {
         thread_id: String,
     },
-    /// one thread with its live comments.
+    /// one cursor page of a thread's live comments. `limit == 0` means 256;
+    /// larger limits clamp to 256. The exclusive `after` id must belong to
+    /// this thread or the canonical query returns `INVALID_INPUT`; the raw
+    /// `comment_ids` scan budget includes tombstones and `next_after` is the
+    /// last scanned id only when more ids remain.
     CommentThread {
         thread_id: String,
+        #[serde(default)]
+        after: Option<String>,
+        limit: u64,
     },
     /// one comment by id, tombstones included — the existence probe a module
     /// emitting `AddComment` follow-ups uses (comment ids are client-minted,
@@ -787,5 +801,31 @@ mod interface_tests {
         };
         assert!(anchor.is_none());
         assert!(mentions.is_empty());
+    }
+
+    #[test]
+    fn canonical_comment_thread_wire_keeps_exclusive_cursor_contract() {
+        let query = PageQuery::CommentThread {
+            thread_id: "t1".into(),
+            after: Some("c1".into()),
+            limit: 0,
+        };
+        assert_eq!(decode_query(&encode_query(&query)).unwrap(), query);
+        let reply = PageReply::CommentThread(Some(ThreadView {
+            thread: Thread {
+                id: "t1".into(),
+                target: "b1".into(),
+                opener: Party::System,
+                created_at: 1,
+                anchor: None,
+                resolved: false,
+                resolved_by: None,
+                comment_ids: vec!["c1".into(), "c2".into()],
+            },
+            comments: Vec::new(),
+            has_more: true,
+            next_after: Some("c2".into()),
+        }));
+        assert_eq!(decode_reply(&encode_reply(&reply)).unwrap(), reply);
     }
 }

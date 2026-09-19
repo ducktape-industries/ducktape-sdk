@@ -347,12 +347,22 @@ pub struct InvocationView {
 }
 
 /// one entry of an account's invocation listing: the invocation and its
-/// position in that listing, the `after` cursor that continues it.
+/// position in that listing. `at` is the exclusive-ordinal cursor returned
+/// for continuation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationEntry {
     pub at: u64,
     pub invocation: InvocationView,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InvocationPage {
+    pub entries: Vec<InvocationEntry>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<u64>,
 }
 
 // ---- ops ------------------------------------------------------------------------------
@@ -413,9 +423,10 @@ pub enum AgentQuery {
         account: AccountNumber,
         seq: u64,
     },
-    /// the invocations of one account in starting order, after cursor
-    /// `after` (`0` reads from the first). `at` is the account's own
-    /// ordinal, starting at 1.
+    /// the invocations of one account in starting order, exclusively after
+    /// ordinal `after` (`0` reads from the first). `limit == 0` means 256 and
+    /// larger limits clamp to 256. `next_after` is the last returned ordinal
+    /// only when more invocations remain.
     Invocations {
         account: AccountNumber,
         after: u64,
@@ -436,7 +447,7 @@ pub enum AgentReply {
     Provision(Option<ProvisionReceipt>),
     Binding(Option<BindingView>),
     Invocation(Option<InvocationView>),
-    Invocations(Vec<InvocationEntry>),
+    Invocations(InvocationPage),
 }
 
 /// the stamp an op declares through `set_assigned`: the value this module
@@ -636,6 +647,14 @@ mod tests {
         ] {
             assert_eq!(decode_query(&encode_query(&q)).unwrap(), q);
         }
+        let query = AgentQuery::Invocations {
+            account: 2,
+            after: 17,
+            limit: 0,
+        };
+        let json = serde_json::to_value(&query).unwrap();
+        assert_eq!(json["invocations"]["after"], 17);
+        assert_eq!(json["invocations"]["limit"], 0);
         let call_id = CallId {
             requester: "agent".into(),
             invocation: "2/9".into(),
@@ -663,6 +682,16 @@ mod tests {
                 .unwrap(),
             )]),
         };
+        let invocation_page = InvocationPage {
+            entries: (1..=257)
+                .map(|at| InvocationEntry {
+                    at,
+                    invocation: view.clone(),
+                })
+                .collect(),
+            has_more: true,
+            next_after: Some(257),
+        };
         for r in [
             AgentReply::Binding(Some(BindingView {
                 account: 2,
@@ -670,19 +699,24 @@ mod tests {
                 revision: 3,
             })),
             AgentReply::Invocation(Some(view.clone())),
-            AgentReply::Invocations(vec![InvocationEntry {
-                at: 1,
-                invocation: InvocationView {
-                    status: Status::Failed {
-                        step: 2,
-                        failure: Failure::Program(ProgramFault::FrameTooLarge { bytes: 9 }),
-                    },
-                    ..view
-                },
-            }]),
+            AgentReply::Invocations(invocation_page),
         ] {
             assert_eq!(decode_reply(&encode_reply(&r)).unwrap(), r);
         }
+        let AgentReply::Invocations(page) =
+            decode_reply(&encode_reply(&AgentReply::Invocations(InvocationPage {
+                entries: vec![InvocationEntry {
+                    at: 18,
+                    invocation: view.clone(),
+                }],
+                has_more: true,
+                next_after: Some(18),
+            })))
+            .unwrap()
+        else {
+            panic!("expected invocation page")
+        };
+        assert_eq!(page.next_after, Some(18));
         let assigned = AgentAssigned::Provisioned { account: 2 };
         assert_eq!(
             decode_assigned(&encode_assigned(&assigned)).unwrap(),

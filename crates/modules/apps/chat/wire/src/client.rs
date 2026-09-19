@@ -69,9 +69,6 @@ pub struct ChatReaction {
     pub emoji: String,
     pub count: i64,
     pub reacted_by_me: bool,
-    /// rendered reactor handles — the dedupe set delta folds need for exact
-    /// counts (mirrors the index row's reactor list; not rendered).
-    pub reactors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -268,16 +265,6 @@ impl<'a> ChatReader<'a> {
     pub fn is_me(&self, handle: &str) -> bool {
         self.key
             .is_some_and(|key| self.names.owns_handle(handle, key))
-    }
-
-    /// This reader's own signing key, exactly — narrower than [`Self::is_me`]:
-    /// two devices of one account both answer `is_me` true for a handle
-    /// either of them owns, but only the row naming THIS key answers here.
-    /// Reaction ownership hangs on this: "reacted by me" means this key
-    /// pressed it, not that some other device sharing the account did.
-    fn is_this_key(&self, handle: &str) -> bool {
-        self.key
-            .is_some_and(|key| handle == index::party_handle(&Party::Key(key.to_vec())))
     }
 }
 
@@ -509,13 +496,19 @@ pub enum ChatDelta {
         channel_id: String,
         seq: i64,
     },
-    Reaction {
+    /// A reaction op cannot be folded from a count-only summary: add/remove
+    /// are idempotent and one viewer may own both account and exact-key rows.
+    /// The shell reloads this one canonical row with the viewer's handles.
+    MessageRefresh {
         channel_id: String,
         seq: i64,
-        emoji: String,
-        added: bool,
-        reactor: String,
-        by_me: bool,
+    },
+    /// Completion of a `MessageRefresh`. Keeping the channel on the result
+    /// lets the shell discard a read that finished after navigation.
+    MessageUpdated {
+        channel_id: String,
+        seq: i64,
+        message: ChatMessage,
     },
     Membership {
         channel_id: String,
@@ -712,29 +705,17 @@ pub fn delta_from_op(
             seq: number_i64(seq),
         },
         ChatMsg::AddReaction {
-            channel_id,
-            seq,
-            emoji,
-        } => reaction_delta(
-            channel_id,
-            seq,
-            emoji,
-            true,
-            decode_stamp(assigned)?.participant()?,
-            reader,
-        ),
-        ChatMsg::RemoveReaction {
-            channel_id,
-            seq,
-            emoji,
-        } => reaction_delta(
-            channel_id,
-            seq,
-            emoji,
-            false,
-            decode_stamp(assigned)?.participant()?,
-            reader,
-        ),
+            channel_id, seq, ..
+        }
+        | ChatMsg::RemoveReaction {
+            channel_id, seq, ..
+        } => {
+            let _ = decode_stamp(assigned)?.participant()?;
+            ChatDelta::MessageRefresh {
+                channel_id,
+                seq: number_i64(seq),
+            }
+        }
         ChatMsg::RegisterHook { .. } | ChatMsg::UnregisterHook { .. } => return Ok(None),
         ChatMsg::SetMembership {
             channel_id,
@@ -756,28 +737,6 @@ pub fn delta_from_op(
         | ChatMsg::SweepHuddle { channel_id, .. } => ChatDelta::ChannelRefresh { channel_id },
     };
     Ok(Some(delta))
-}
-
-fn reaction_delta(
-    channel_id: String,
-    seq: u64,
-    emoji: String,
-    added: bool,
-    actor: &Party,
-    reader: ChatReader<'_>,
-) -> ChatDelta {
-    let reactor = index::party_handle(actor);
-    // Reaction ownership is per-KEY, not per-account: `is_me` would light up
-    // "reacted by me" on every device of the account that pressed it.
-    let by_me = reader.is_this_key(&reactor);
-    ChatDelta::Reaction {
-        channel_id,
-        seq: number_i64(seq),
-        emoji,
-        added,
-        reactor,
-        by_me,
-    }
 }
 
 fn decode_stamp(assigned: Option<&serde_json::Value>) -> Result<ChatAssigned, String> {
@@ -882,69 +841,63 @@ pub fn tombstone_message(mut messages: Vec<ChatMessage>, seq: i64) -> Vec<ChatMe
     messages
 }
 
-/// Reactor-set semantics, mirroring the index fold: a reactor appears at most
-/// once per emoji, so replayed or double-submitted reactions cannot drift the
-/// count.
-pub fn merge_message_reaction(
+/// Replace one displayed row with the canonical row loaded for a
+/// [`ChatDelta::MessageRefresh`], preserving its client-only list identity.
+pub fn merge_message_refresh(
     mut messages: Vec<ChatMessage>,
     seq: i64,
-    emoji: &str,
-    added: bool,
-    reactor: &str,
-    by_me: bool,
+    mut canonical: ChatMessage,
 ) -> Vec<ChatMessage> {
-    let Some(row) = messages
+    if canonical.pending || canonical.seq != seq {
+        return messages;
+    }
+    let Some(index) = messages
         .iter_mut()
-        .find(|message| !message.pending && message.seq == seq)
+        .position(|message| !message.pending && message.seq == seq)
     else {
         return messages;
     };
-    if row.deleted {
+    canonical.view_key = messages[index].view_key;
+    messages[index] = canonical;
+    mark_message_groups(&mut messages);
+    messages
+}
+
+/// Paint the viewer's reaction tap while the op is in flight. The applied op
+/// settles through [`ChatDelta::MessageRefresh`], never through another local
+/// count guess.
+pub fn optimistic_reaction(
+    mut messages: Vec<ChatMessage>,
+    seq: i64,
+    emoji: String,
+    added: bool,
+) -> Vec<ChatMessage> {
+    let Some(row) = messages
+        .iter_mut()
+        .find(|message| !message.pending && message.seq == seq && !message.deleted)
+    else {
         return messages;
-    }
+    };
     match row
         .reactions
         .iter_mut()
         .find(|reaction| reaction.emoji == emoji)
     {
-        Some(reaction) => {
-            reaction.reactors.retain(|current| current != reactor);
-            if added {
-                reaction.reactors.push(reactor.into());
-            }
-            reaction.count = count_i64(reaction.reactors.len());
-            reaction.reacted_by_me = match by_me {
-                true => added,
-                false => reaction.reacted_by_me,
-            };
+        Some(reaction) if reaction.reacted_by_me != added => {
+            reaction.reacted_by_me = added;
+            reaction.count = (reaction.count + if added { 1 } else { -1 }).max(0);
         }
+        Some(_) => return messages,
         None if added => row.reactions.push(ChatReaction {
-            emoji: emoji.into(),
+            emoji,
             count: 1,
-            reacted_by_me: by_me,
-            reactors: vec![reactor.into()],
+            reacted_by_me: true,
         }),
-        // a remove of an emoji the row never had touched nothing: no rescan,
-        // no bump.
         None => return messages,
     }
     row.reactions.retain(|reaction| reaction.count > 0);
     row.bump_render_rev();
     messages
-}
-
-/// The optimistic half of a reaction tap: the SAME reactor-set fold the live
-/// delta rides, applied locally before the op is submitted. `reactor` must be
-/// the canonical rendered handle (`user:{hex}`) — set semantics then make the
-/// real delta's replay a no-op instead of a double count.
-pub fn optimistic_reaction(
-    messages: Vec<ChatMessage>,
-    seq: i64,
-    emoji: String,
-    added: bool,
-    reactor: String,
-) -> Vec<ChatMessage> {
-    merge_message_reaction(messages, seq, &emoji, added, &reactor, true)
 }
 
 // ============================================================================
@@ -1245,26 +1198,15 @@ pub fn chat_message(row: MsgRow, reader: ChatReader<'_>, chain: &ChainId) -> Cha
         reactions: row
             .reactions
             .into_iter()
-            .map(|reaction| {
-                let reacted_by_me = reacted_by_reader(&reaction.reactors, reader);
-                ChatReaction {
-                    emoji: reaction.emoji,
-                    count: count_i64(reaction.reactors.len()),
-                    reacted_by_me,
-                    reactors: reaction.reactors,
-                }
+            .map(|reaction| ChatReaction {
+                emoji: reaction.emoji,
+                count: count_i64(reaction.count as usize),
+                reacted_by_me: reaction.reacted_by_me,
             })
             .collect(),
         render_rev: 0,
     }
     .seed_render_rev()
-}
-
-/// True when the reader's OWN signing key (`user:{hex}`, never the account)
-/// is among a reaction's reactors — a phone's reaction must not light up
-/// "reacted by me" on the laptop just because both keys share an account.
-fn reacted_by_reader(reactors: &[String], reader: ChatReader<'_>) -> bool {
-    reactors.iter().any(|reactor| reader.is_this_key(reactor))
 }
 
 /// Slack-style grouping: a message shows its avatar + author header only when it
@@ -2144,13 +2086,12 @@ mod tests {
         // emoji the row never had touches nothing.
         let messages = vec![committed(3, "a")];
         let before = messages[0].render_rev;
-        let added = optimistic_reaction(messages, 3, "👍".into(), true, "user:ab".into());
+        let added = optimistic_reaction(messages, 3, "👍".into(), true);
         assert_ne!(added[0].render_rev, before, "a reaction add bumps");
         let mid = added[0].render_rev;
-        let removed = optimistic_reaction(added, 3, "👍".into(), false, "user:ab".into());
+        let removed = optimistic_reaction(added, 3, "👍".into(), false);
         assert_ne!(removed[0].render_rev, mid, "a reaction remove bumps");
-        let untouched =
-            optimistic_reaction(removed.clone(), 3, "🎉".into(), false, "user:ab".into());
+        let untouched = optimistic_reaction(removed.clone(), 3, "🎉".into(), false);
         assert_eq!(
             untouched[0].render_rev, removed[0].render_rev,
             "a remove of an absent emoji is a no-op"
@@ -2183,12 +2124,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canonical_reaction_refresh_settles_optimism_without_guessing() {
+        let mut message = committed(7, "alice");
+        message.reactions.push(ChatReaction {
+            emoji: "👍".into(),
+            count: 3,
+            reacted_by_me: false,
+        });
+        let view_key = message.view_key;
+        let optimistic = optimistic_reaction(vec![message.clone()], 7, "👍".into(), true);
+        assert_eq!(optimistic[0].reactions[0].count, 4);
+        assert!(optimistic[0].reactions[0].reacted_by_me);
+
+        // A duplicate canonical add is a no-op: replacing with its hydrated
+        // row restores the authoritative aggregate and viewer OR bit.
+        let settled = merge_message_refresh(optimistic, 7, message);
+        assert_eq!(settled[0].view_key, view_key);
+        assert_eq!(settled[0].reactions[0].count, 3);
+        assert!(!settled[0].reactions[0].reacted_by_me);
+    }
+
+    #[test]
+    fn reaction_ops_request_a_canonical_message_refresh() {
+        let assigned = serde_json::to_value(ChatAssigned::Participant {
+            actor: Party::Account(7),
+            participant: Party::Account(7),
+        })
+        .unwrap();
+        for msg in [
+            ChatMsg::AddReaction {
+                channel_id: "g".into(),
+                seq: 3,
+                emoji: "👍".into(),
+            },
+            ChatMsg::RemoveReaction {
+                channel_id: "g".into(),
+                seq: 3,
+                emoji: "👍".into(),
+            },
+        ] {
+            let payload = serde_json::to_vec(&msg).unwrap();
+            let delta = delta_from_op(
+                &payload,
+                Some(&assigned),
+                "external",
+                None,
+                ChatReader::nobody(),
+                &chain(),
+                1,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(matches!(
+                delta,
+                ChatDelta::MessageRefresh {
+                    channel_id,
+                    seq: 3
+                } if channel_id == "g"
+            ));
+        }
+    }
+
     /// Construction seeds `render_rev` from the rendered content, so a
     /// wholesale replacement (a resync) moves the key exactly when the
     /// replacement row renders differently — and keeps it when it does not.
     #[test]
     fn construction_seeds_render_rev_from_rendered_content() {
-        let row = |reactions: Vec<index::ReactionRow>| MsgRow {
+        let row = |reactions: Vec<index::ReactionSummary>| MsgRow {
             channel_id: "general".into(),
             seq: 7,
             message_id: "m7".into(),
@@ -2215,9 +2218,10 @@ mod tests {
             "identical content seeds identically — the cached subtree is kept"
         );
         let reacted = chat_message(
-            row(vec![index::ReactionRow {
+            row(vec![index::ReactionSummary {
                 emoji: "👍".into(),
-                reactors: vec!["user:cd".into()],
+                count: 1,
+                reacted_by_me: true,
             }]),
             ChatReader::nobody(),
             &chain(),
@@ -2226,6 +2230,7 @@ mod tests {
             plain.render_rev, reacted.render_rev,
             "a replacement row with reactions the displayed copy never saw moves the key"
         );
+        assert!(reacted.reactions[0].reacted_by_me);
 
         // the optimistic mint seeds too. NOTE the seed follows the manual
         // `Hash` contract, which excludes body/blocks: under ONE id a pending
@@ -2285,17 +2290,9 @@ mod tests {
         let mine = format!("user:{}", hex_encode(&me));
         let theirs = format!("user:{}", hex_encode(&[0xcd; 32]));
         let unbound = format!("user:{}", hex_encode(&[0xef; 32]));
-        let my_passkey = format!("user:{}", hex_encode(&[0x11; 32]));
         let names = NameDirectory::new(BTreeMap::from([
             (
                 hex_encode(&me),
-                BoundAccount {
-                    number: 1,
-                    name: "alice".into(),
-                },
-            ),
-            (
-                hex_encode(&[0x11; 32]),
                 BoundAccount {
                     number: 1,
                     name: "alice".into(),
@@ -2331,24 +2328,6 @@ mod tests {
             names.member_label(&hex_encode(&[0xef; 32])),
             short_label(&hex_encode(&[0xef; 32]))
         );
-
-        // `by me` hangs on the reader's KEY, never the account: a reactor
-        // entry recorded as the account (`acct:1` — what the module writes
-        // when any of the account's keys reacts) is not "by me" on a device
-        // holding a DIFFERENT key of that same account, and a raw handle
-        // naming another key never matches either way.
-        let reader = ChatReader::new(Some(&me), &names);
-        assert!(reacted_by_reader(std::slice::from_ref(&mine), reader));
-        assert!(!reacted_by_reader(
-            std::slice::from_ref(&my_passkey),
-            reader
-        ));
-        assert!(!reacted_by_reader(&["acct:1".into()], reader));
-        assert!(!reacted_by_reader(std::slice::from_ref(&theirs), reader));
-        assert!(!reacted_by_reader(&[mine], ChatReader::nobody()));
-        // Two keys the directory does not know are two people.
-        let cold = ChatReader::new(Some(&me), ChatReader::nobody().names);
-        assert!(!reacted_by_reader(&[my_passkey], cold));
     }
 
     /// A KEY IS NOT A NAME, AND THE READER NEVER ASKED FOR ONE. `user:{hex}` is
@@ -2753,68 +2732,6 @@ mod tests {
         // a person may name a channel this and it stays a channel.
         assert!(!is_derived_dm_channel("dm-standup"));
         assert!(!is_derived_dm_channel(&derived.to_ascii_uppercase()));
-    }
-
-    #[test]
-    fn reactions_know_the_local_reactor() {
-        let reactors = vec![
-            format!("user:{}", hex_encode(&[0xab; 32])),
-            "system".to_string(),
-        ];
-        let names = NameDirectory::default();
-        let me = [0xab; 32];
-        let someone_else = [0xcd; 32];
-        assert!(reacted_by_reader(
-            &reactors,
-            ChatReader::new(Some(&me), &names)
-        ));
-        assert!(!reacted_by_reader(
-            &reactors,
-            ChatReader::new(Some(&someone_else), &names)
-        ));
-        assert!(!reacted_by_reader(&reactors, ChatReader::nobody()));
-    }
-
-    /// Two devices, one account: a phone's reaction must not read as "reacted
-    /// by me" on the laptop, and tapping it there must not think it has
-    /// anything of its own to remove.
-    #[test]
-    fn reacted_by_me_means_this_key_not_this_account() {
-        let laptop = [0xaau8; 32];
-        let phone = [0xadu8; 32];
-        let names = NameDirectory::new(BTreeMap::from([
-            (
-                hex_encode(&laptop),
-                BoundAccount {
-                    number: 1,
-                    name: "me".into(),
-                },
-            ),
-            (
-                hex_encode(&phone),
-                BoundAccount {
-                    number: 1,
-                    name: "me".into(),
-                },
-            ),
-        ]));
-        let reader = ChatReader::new(Some(&laptop), &names);
-
-        // The module records a reaction by ACCOUNT once the reacting key is
-        // bound — `acct:1` regardless of which of the account's keys pressed
-        // it (see `Authority::participant`) — so this is what the phone's
-        // reaction looks like on the wire.
-        let phone_reacted = vec!["acct:1".to_string()];
-        assert!(
-            !reacted_by_reader(&phone_reacted, reader),
-            "the phone's reaction is not the laptop's to un-react"
-        );
-
-        let laptop_reacted = vec![format!("user:{}", hex_encode(&laptop))];
-        assert!(
-            reacted_by_reader(&laptop_reacted, reader),
-            "this device's own key is always its own reaction"
-        );
     }
 
     #[test]
