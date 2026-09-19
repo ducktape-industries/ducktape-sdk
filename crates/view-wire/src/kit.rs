@@ -229,6 +229,17 @@ pub fn ellipsize(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars - 1).chain(Some('…')).collect()
 }
 
+/// The head of an id, a digest or a key: the first `keep` chars, then `…` when
+/// there was more. Unlike [`ellipsize`] the mark is NOT counted, so `keep` is
+/// how much of the id stays readable whatever its length.
+pub fn short_id(id: &str, keep: usize) -> String {
+    let mut head: String = id.chars().take(keep).collect();
+    if id.chars().count() > keep {
+        head.push('…');
+    }
+    head
+}
+
 /// One line of text cut to a count: what a name, a path or a title reads as
 /// in a column too narrow for it. See [`ellipsize`] for what the count means.
 pub fn truncated(key: impl Into<String>, content: &str, max_chars: usize) -> Node {
@@ -978,6 +989,20 @@ mod tests {
         assert_eq!(width, Some(Length::Fill));
         assert_eq!(style.preset, ButtonPreset::Subtle);
         assert_eq!(on_press, Some(3));
+    }
+
+    #[test]
+    fn a_short_id_keeps_its_head_and_marks_only_a_cut() {
+        for (id, keep, want) in [
+            ("0123456789", 8, "01234567…"),
+            ("01234567", 8, "01234567"),
+            ("abc", 8, "abc"),
+            ("오리테이프", 2, "오리…"),
+            ("abc", 0, "…"),
+            ("", 0, ""),
+        ] {
+            assert_eq!(short_id(id, keep), want, "short_id({id:?}, {keep})");
+        }
     }
 
     #[test]

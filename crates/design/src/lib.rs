@@ -79,6 +79,8 @@ pub mod radius {
 /// and every edge they pad is a step on it, so a view names the step instead
 /// of the number.
 pub mod spacing {
+    /// two lines that read as one: a name over its caption
+    pub const HAIR: f64 = 2.;
     /// the tightest gap: a row's own inset, two lines that belong together
     pub const XXS: f64 = 4.;
     /// a label over the thing it names: a field, a stacked key/value
@@ -89,6 +91,8 @@ pub mod spacing {
     pub const MD: f64 = 10.;
     /// a card's inset, and the gap between a label and its value
     pub const LG: f64 = 12.;
+    /// between blocks of one page: wider than a card's inset, short of a section
+    pub const BLOCK: f64 = 16.;
     /// a section inset: what an empty state or a centred block sits in
     pub const XL: f64 = 24.;
 }
@@ -404,11 +408,13 @@ mod tests {
     #[test]
     fn the_scales_ascend() {
         let scale = [
+            spacing::HAIR,
             spacing::XXS,
             spacing::XS,
             spacing::SM,
             spacing::MD,
             spacing::LG,
+            spacing::BLOCK,
             spacing::XL,
         ];
         assert!(scale.windows(2).all(|pair| pair[0] < pair[1]));
