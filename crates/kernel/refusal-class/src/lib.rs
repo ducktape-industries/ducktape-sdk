@@ -33,9 +33,11 @@
 //! | `UNEXPECTED_REPLY` | `unexpected_reply` | an operator: a sibling module answered a shape or value this module does not accept; the sibling's owner looks. |
 //!
 //! Host-reserved tokens, produced only by wasm-host / module-sdk at the
-//! boundary, never by a module: `trap` (the guest trapped; sentence is the
-//! trap), `unframed_refusal` (a peer refused with a string that is not
-//! framed). Keep them as constants too (`TRAP`, `UNFRAMED_REFUSAL`).
+//! boundary, never by a module: `guest_fault` (the module misbehaved at the
+//! boundary — it trapped or broke the host contract; the module's owner looks,
+//! and the sentence says which), `unframed_refusal` (a peer refused with a
+//! string that is not framed). Keep them as constants too (`GUEST_FAULT`,
+//! `UNFRAMED_REFUSAL`).
 //!
 //! Who may mint what. The frame carries no refuser, so a caller attributes a
 //! refusal to the module it addressed and may act on its sentence (a canvas
@@ -84,8 +86,8 @@ pub const UNSUPPORTED: &str = "unsupported";
 pub const CORRUPT: &str = "corrupt";
 /// an operator: a sibling module answered a shape or value this one refuses.
 pub const UNEXPECTED_REPLY: &str = "unexpected_reply";
-/// host-reserved: the guest trapped; the sentence is the trap.
-pub const TRAP: &str = "trap";
+/// host-reserved: the module trapped or broke the host contract; its owner looks.
+pub const GUEST_FAULT: &str = "guest_fault";
 /// host-reserved: a peer refused with a string that is not framed.
 pub const UNFRAMED_REFUSAL: &str = "unframed_refusal";
 
@@ -109,7 +111,7 @@ mod tests {
             UNSUPPORTED,
             CORRUPT,
             UNEXPECTED_REPLY,
-            TRAP,
+            GUEST_FAULT,
             UNFRAMED_REFUSAL,
         ];
         for (i, a) in all.iter().enumerate() {

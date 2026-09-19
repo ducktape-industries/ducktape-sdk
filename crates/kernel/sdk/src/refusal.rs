@@ -74,7 +74,7 @@ mod tests {
             UNSUPPORTED,
             CORRUPT,
             UNEXPECTED_REPLY,
-            TRAP,
+            GUEST_FAULT,
             UNFRAMED_REFUSAL,
         ] {
             assert_eq!(decode(&encode(token, "x")), Some((token, "x")));

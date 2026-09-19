@@ -1433,7 +1433,7 @@ impl WasmModule {
             return Ok(());
         }
         Err(SdkError::module(
-            sdk::refusal::INVALID_INPUT,
+            sdk::refusal::GUEST_FAULT,
             format!(
                 "module {id}: the component declares a {:?} backing but the host offered {offered:?} — fail-closed",
                 shape.backing
@@ -1502,7 +1502,7 @@ impl WasmModule {
         };
         let digest: &[u8; ROOT_LEN] = key.try_into().map_err(|_| {
             SdkError::module(
-                sdk::refusal::INVALID_INPUT,
+                sdk::refusal::GUEST_FAULT,
                 format!(
                     "store-backed state keys must be {ROOT_LEN}-byte digests, got {}",
                     key.len()
@@ -1746,7 +1746,7 @@ impl WasmModule {
                         self.staged = staged0;
                         self.staged_objects = staged_objects0;
                         return Err(SdkError::module(
-                            sdk::refusal::INVALID_INPUT,
+                            sdk::refusal::GUEST_FAULT,
                             "module lifecycle cannot emit dispatch outputs",
                         ));
                     }
@@ -1887,7 +1887,7 @@ impl WasmModule {
                 for (key, value) in &self.staged {
                     let digest: [u8; ROOT_LEN] = key.as_slice().try_into().map_err(|_| {
                         SdkError::module(
-                            sdk::refusal::INVALID_INPUT,
+                            sdk::refusal::GUEST_FAULT,
                             format!(
                                 "store-backed state keys must be {ROOT_LEN}-byte digests, got {}",
                                 key.len()
@@ -2289,7 +2289,7 @@ fn to_wit_ack(ack: &SdkAck) -> WitAck {
 /// code runs on every validator under the same fuel budget, so it traps at the
 /// same point. Surfaced as [`SdkError::Module`] → the host rolls the op back.
 fn module_err(e: impl std::fmt::Display) -> SdkError {
-    SdkError::module(sdk::refusal::TRAP, format!("{e:#}"))
+    SdkError::module(sdk::refusal::GUEST_FAULT, format!("{e:#}"))
 }
 
 fn wit_err(e: WitError) -> SdkError {
@@ -2367,7 +2367,7 @@ impl Mutation<'_> {
                 let has_followups = messages != 0;
                 if has_followups {
                     return Err(SdkError::module(
-                        sdk::refusal::INVALID_INPUT,
+                        sdk::refusal::GUEST_FAULT,
                         format!(
                             "{module}: an acknowledgment emitted {messages} follow-up intents; none are allowed"
                         ),

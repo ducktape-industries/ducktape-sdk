@@ -195,7 +195,7 @@ async fn object_read_budget_is_a_deterministic_rejection() {
     assert!(matches!(
         &err,
         Error::Module { reason, sentence }
-            if reason == sdk::refusal::TRAP && sentence.contains("object-read budget")
+            if reason == sdk::refusal::GUEST_FAULT && sentence.contains("object-read budget")
     ));
     m.abort_block().await.expect("abort");
     assert_eq!(m.root(), root_before, "a rejected op stages nothing");
