@@ -73,18 +73,33 @@ pub fn text(key: impl Into<String>, content: impl Into<String>) -> Node {
 
 /// A view's own title row.
 pub fn title(key: impl Into<String>, content: impl Into<String>) -> Node {
-    weighted(
-        text_size(text(key, content), type_scale::TITLE as f32),
-        wire::Weight::Semibold,
+    heading_level(
+        weighted(
+            text_size(text(key, content), type_scale::TITLE as f32),
+            wire::Weight::Semibold,
+        ),
+        1,
     )
 }
 
 /// A section title inside a view.
 pub fn heading(key: impl Into<String>, content: impl Into<String>) -> Node {
-    weighted(
-        text_size(text(key, content), type_scale::SECTION as f32),
-        wire::Weight::Semibold,
+    heading_level(
+        weighted(
+            text_size(text(key, content), type_scale::SECTION as f32),
+            wire::Weight::Semibold,
+        ),
+        2,
     )
+}
+
+/// What a title looks like is not what it IS: assistive technology reads the
+/// level, so the two builders that draw a heading also say so.
+fn heading_level(mut node: Node, level: u8) -> Node {
+    if let Node::Text { heading, .. } = &mut node {
+        *heading = Some(level);
+    }
+    node
 }
 
 /// Body text with emphasis: a row's name, a message author.

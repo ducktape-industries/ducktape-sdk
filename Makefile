@@ -99,7 +99,7 @@ fixture-guests-check:
 # What a wasm32 view may link. A wire crate that a view links must never reach
 # the signing/identity graph (blst does not build for wasm32, and a view has no
 # business holding keys); add a crate here when a view starts linking it.
-VIEW_LINKABLE := duck-address view-wire chat-message boards-wire files-wire pages-wire
+VIEW_LINKABLE := duck-address refusal-class view-wire design chat-message boards-wire files-wire pages-wire duckfs-core
 VIEW_FORBIDDEN := blst commonware-cryptography keyscheme identity-wire governance-wire
 
 .PHONY: view-wasm-check

@@ -51,6 +51,28 @@ impl TryFrom<&Address> for ForgeRepoAddress {
 }
 
 impl ForgeRepoAddress {
+    /// read a forge repository NAME. Forge names a repository
+    /// `<owner>/<repo>` and lists it that way, so a caller holding a listed
+    /// name gets its address from the name alone and never derives an owner.
+    /// A name with no `/` is a repository from before the namespace: it stays
+    /// readable in forge and has no address.
+    pub fn from_name(name: &str) -> Result<Self, Refused> {
+        match name.split_once('/') {
+            Some((owner, repo)) if !repo.contains('/') => Self::named(owner, repo),
+            _ => Err(Refused::new(
+                INVALID_INPUT,
+                format!(
+                    "A forge repository is named `<owner>/<repo>` with exactly one `/`, and `{name}` is not, so it has no address."
+                ),
+            )),
+        }
+    }
+
+    /// the name forge lists this repository under: `<owner>/<repo>`.
+    pub fn name(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+
     /// the address this repository is at on `chain`.
     pub fn address(&self, chain: ChainId) -> Result<Address, Refused> {
         let address = Address::new(chain, "forge", vec![self.owner.clone(), self.repo.clone()])?;
@@ -426,5 +448,17 @@ mod tests {
         assert!(
             sentence(ForgeRepoAddress::try_from(&built)).contains("names the module `gateway`")
         );
+    }
+
+    #[test]
+    fn a_listed_name_is_its_address_and_a_flat_name_has_none() {
+        let repo = ForgeRepoAddress::from_name("ducktape-industries/ducktape-sdk").expect("named");
+        assert_eq!(repo.owner, "ducktape-industries");
+        assert_eq!(repo.repo, "ducktape-sdk");
+        assert_eq!(repo.name(), "ducktape-industries/ducktape-sdk");
+        for flat in ["ducktape-sdk", "a/b/c", "", "/repo", "owner/"] {
+            let refused = ForgeRepoAddress::from_name(flat).expect_err(flat);
+            assert_eq!(refused.reason, INVALID_INPUT);
+        }
     }
 }
