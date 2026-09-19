@@ -93,18 +93,13 @@ pub mod spacing {
     pub const XL: f64 = 24.;
 }
 
-/// What one line of the kit occupies, in pixels, so a view can reserve or
-/// virtualize space without measuring text. Each is the type size the
-/// builder draws plus the inset it pads with — change a builder's padding
-/// and change the constant with it.
+/// The heights a view fixes, in pixels, so rows line up across views and a
+/// list can be reserved or virtualized without measuring text.
 pub mod height {
-    use super::{spacing, type_scale};
-    /// a list row: one body line inside `kit::list_row`'s inset
-    pub const ROW: f64 = type_scale::BODY + 2. * spacing::XXS;
-    /// a control on one line — a button, an input. The native kit fixes no
-    /// height on either, so this is what one costs a layout: a body line
-    /// inside the control inset.
-    pub const CONTROL: f64 = type_scale::BODY + 2. * spacing::SM;
+    /// a list row: a chat name, a file, a forge item
+    pub const ROW: f64 = 26.;
+    /// a control on one line: a toolbar button, a picker, an input beside one
+    pub const CONTROL: f64 = 28.;
 }
 
 /// One sRGB color as the wire carries it: `[r, g, b, a]` in `0.0..=1.0`.
@@ -407,9 +402,8 @@ mod tests {
     }
 
     #[test]
-    fn a_line_height_is_its_type_size_inside_its_own_inset() {
-        assert_eq!(height::ROW, type_scale::BODY + 2. * spacing::XXS);
-        assert_eq!(height::CONTROL, type_scale::BODY + 2. * spacing::SM);
+    fn the_scales_ascend() {
+        assert!(type_scale::BODY < height::ROW && height::ROW < height::CONTROL);
         let scale = [
             spacing::XXS,
             spacing::XS,
