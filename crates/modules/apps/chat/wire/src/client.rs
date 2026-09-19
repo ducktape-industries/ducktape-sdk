@@ -69,8 +69,9 @@ pub struct ChatReaction {
     pub emoji: String,
     pub count: i64,
     pub reacted_by_me: bool,
-    /// Reactor handles observed since this aggregate was hydrated. The list
-    /// deduplicates live/optimistic adds; it is not the full reactor set.
+    /// Internal membership facts observed since this aggregate was hydrated;
+    /// absent handles carry a NUL prefix. This is not the full reactor set and
+    /// is never rendered.
     pub reactors: Vec<String>,
 }
 
@@ -898,19 +899,26 @@ pub fn merge_message_reaction(
         .find(|reaction| reaction.emoji == emoji)
     {
         Some(reaction) => {
-            let was_observed = reaction.reactors.iter().any(|current| current == reactor);
-            let changed = if by_me {
-                reaction.reacted_by_me != added
-            } else if added {
-                !was_observed
+            let absent = format!("\0{reactor}");
+            let observed = reaction.reactors.iter().find_map(|current| {
+                (current == reactor)
+                    .then_some(true)
+                    .or_else(|| (current == &absent).then_some(false))
+            });
+            // A first non-viewer delta tells us the prior state by direction;
+            // the hydrated viewer bit supplies that fact for the local party.
+            let was_present = if by_me {
+                reaction.reacted_by_me
             } else {
-                true
+                observed.unwrap_or(!added)
             };
-            if added && !was_observed {
-                reaction.reactors.push(reactor.into());
-            } else if !added {
-                reaction.reactors.retain(|current| current != reactor);
-            }
+            let changed = was_present != added;
+            reaction
+                .reactors
+                .retain(|current| current != reactor && current != &absent);
+            reaction
+                .reactors
+                .push(if added { reactor.into() } else { absent });
             if changed {
                 reaction.count = if added {
                     reaction.count.saturating_add(1)
@@ -2194,6 +2202,24 @@ mod tests {
         assert_eq!(replayed[0].reactions[0].count, 4);
         let removed = merge_message_reaction(replayed, 7, "👍", false, "user:other", false);
         assert_eq!(removed[0].reactions[0].count, 3);
+        let replayed = merge_message_reaction(removed, 7, "👍", false, "user:other", false);
+        assert_eq!(replayed[0].reactions[0].count, 3);
+
+        let mut non_viewer = committed(9, "alice");
+        non_viewer.reactions.push(ChatReaction {
+            emoji: "👍".into(),
+            count: 3,
+            reacted_by_me: false,
+            reactors: Vec::new(),
+        });
+        let removed = merge_message_reaction(vec![non_viewer], 9, "👍", false, "user:other", false);
+        assert_eq!(removed[0].reactions[0].count, 2);
+        let replayed = merge_message_reaction(removed, 9, "👍", false, "user:other", false);
+        assert_eq!(replayed[0].reactions[0].count, 2);
+        let added = merge_message_reaction(replayed, 9, "👍", true, "user:other", false);
+        assert_eq!(added[0].reactions[0].count, 3);
+        let replayed = merge_message_reaction(added, 9, "👍", true, "user:other", false);
+        assert_eq!(replayed[0].reactions[0].count, 3);
 
         let mut mine = committed(8, "alice");
         mine.reactions.push(ChatReaction {
