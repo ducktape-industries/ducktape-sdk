@@ -4,8 +4,15 @@
 # `duck://<label>-<salt>/<module>/<module-path…>`: the authority is the chain
 # id the workspace registry already keys a network by, the first path segment
 # names a module (one of the five that claim a name: forge, pages, chat, files,
-# runs), and the rest belongs to that module's wire crate: segments that carry
-# any name, percent-encoded in exactly one spelling.
+# runs), and the rest belongs to that module: segments that carry any name,
+# percent-encoded in exactly one spelling.
+#
+# The parser interprets nothing past the module segment, but the typed tails
+# ship here, one public module per module id (`pages`, `chat`, `runs`,
+# `forge`), because a wasm32 view must be able to name a thing without linking
+# that module's signing and identity graph. Each module's wire crate
+# re-exports its own tail. files is the exception: `FileAddress` applies
+# duckfs's path rule, so it stays in `files-wire`, which builds for wasm32.
 #
 # core's `git-remote-duck`, `ducktape forge setup`, workspace-config and the
 # app all read an address through this one parser, so none of them can invent a

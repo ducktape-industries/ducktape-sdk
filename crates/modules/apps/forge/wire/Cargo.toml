@@ -10,9 +10,9 @@ version.workspace = true
 
 [dependencies]
 sdk = { workspace = true }
-# the `duck://` grammar. forge owns what `<owner>/<repo>` means, so
-# `ForgeRepoAddress` sits here; the grammar around it is one parser for
-# everyone (ducktape#2616).
+# the `duck://` grammar and forge's half of it: `ForgeRepoAddress` and
+# `ForgeLocator` ship in `duck-address` (so a view links them without this
+# crate's signing graph) and this crate re-exports them (ducktape#2616).
 duck-address = { workspace = true }
 chat = { workspace = true }
 serde = { workspace = true }

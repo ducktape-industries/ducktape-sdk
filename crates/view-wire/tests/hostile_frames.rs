@@ -170,6 +170,20 @@ fn gen_opt_align_y(rng: &mut Rng) -> Option<AlignY> {
         .then(|| *rng.choose(&[AlignY::Top, AlignY::Center, AlignY::Bottom]))
 }
 
+fn gen_opt_role(rng: &mut Rng) -> Option<Role> {
+    rng.next_bool().then(|| {
+        *rng.choose(&[
+            Role::Button,
+            Role::Link,
+            Role::Tab,
+            Role::MenuItem,
+            Role::Row,
+            Role::Checkbox,
+            Role::Switch,
+        ])
+    })
+}
+
 fn gen_axis(rng: &mut Rng) -> Axis {
     if rng.next_bool() {
         Axis::Column
@@ -376,6 +390,7 @@ fn gen_button_label(rng: &mut Rng) -> Node {
         checked: rng.next_bool().then(|| rng.next_bool()),
         expanded: rng.next_bool().then(|| rng.next_bool()),
         selected: rng.next_bool().then(|| rng.next_bool()),
+        role: gen_opt_role(rng),
         description: rng.next_bool().then(|| gen_string(rng)),
         key: gen_key(rng),
         content: ButtonContent::Label(gen_string(rng)),
@@ -508,6 +523,11 @@ fn gen_text(rng: &mut Rng) -> Node {
         },
         width: gen_opt_length(rng),
         align_x: gen_opt_align_x(rng),
+        // 0 and 7 are outside 1..=6, for the sanitizer to drop.
+        heading: rng.next_bool().then(|| rng.next_range(8) as u8),
+        live: rng
+            .next_bool()
+            .then(|| *rng.choose(&[Live::Polite, Live::Assertive])),
     }
 }
 
@@ -744,6 +764,7 @@ fn gen_list(rng: &mut Rng, children: Vec<Node>) -> Node {
         1 => {
             return Node::Overlay {
                 key: gen_key(rng),
+                label: rng.next_bool().then(|| gen_string(rng)),
                 padding: gen_f32(rng),
                 backdrop: Rgba([gen_f32(rng), gen_f32(rng), gen_f32(rng), gen_f32(rng)]),
                 align_x: gen_opt_align_x(rng).unwrap_or(AlignX::Center),
@@ -855,17 +876,7 @@ fn gen_tree(rng: &mut Rng, depth: usize, width: usize) -> Node {
             },
             5 => Node::MouseArea {
                 key: gen_key(rng),
-                role: rng.next_bool().then(|| {
-                    *rng.choose(&[
-                        Role::Button,
-                        Role::Link,
-                        Role::Tab,
-                        Role::MenuItem,
-                        Role::Row,
-                        Role::Checkbox,
-                        Role::Switch,
-                    ])
-                }),
+                role: gen_opt_role(rng),
                 label: rng.next_bool().then(|| gen_string(rng)),
                 expanded: rng.next_bool().then(|| rng.next_bool()),
                 selected: rng.next_bool().then(|| rng.next_bool()),
@@ -933,6 +944,7 @@ fn gen_tree(rng: &mut Rng, depth: usize, width: usize) -> Node {
                 checked: rng.next_bool().then(|| rng.next_bool()),
                 expanded: rng.next_bool().then(|| rng.next_bool()),
                 selected: rng.next_bool().then(|| rng.next_bool()),
+                role: gen_opt_role(rng),
                 description: rng.next_bool().then(|| gen_string(rng)),
                 key: gen_key(rng),
                 content: ButtonContent::Child(Box::new(node)),
@@ -1680,9 +1692,14 @@ fn check_bounds(
             size,
             color,
             width,
+            heading,
             ..
         } => {
             check_string(content, ctx, "text content");
+            assert!(
+                heading.is_none_or(|level| (1..=6).contains(&level)),
+                "{ctx}: heading level {heading:?} outside 1..=6"
+            );
             if let Some(size) = size {
                 assert!(
                     size.is_finite() && (0.0..=TEXT_PIXEL_BOUND).contains(size),
@@ -2082,11 +2099,15 @@ fn check_bounds(
             }
         }
         Node::Overlay {
+            label,
             padding,
             backdrop,
             children,
             ..
         } => {
+            if let Some(label) = label {
+                check_string(label, ctx, "accessible label");
+            }
             check_pixels(&Some(*padding), ctx, "overlay padding");
             check_color(&Some(*backdrop), ctx);
             assert!(children.len() <= 2, "{ctx}: overlay child count");

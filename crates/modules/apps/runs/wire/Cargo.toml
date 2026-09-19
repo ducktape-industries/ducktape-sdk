@@ -13,9 +13,10 @@ version.workspace = true
 
 [dependencies]
 sdk = { workspace = true }
-# the `duck://` grammar. runs owns what `<digest>` means, so `RunAddress` sits
-# here; the grammar around it is one parser for everyone. Zero-dep but for
-# `refusal-class`, so it is SDK-shaped like the rest.
+# the `duck://` grammar and runs' half of it: `RunAddress` ships in
+# `duck-address` (so a view links it without this crate's signing graph) and
+# this crate re-exports it. Zero-dep but for `refusal-class`, so it is
+# SDK-shaped like the rest.
 duck-address = { workspace = true }
 # a run's program IS an agent program.
 agent-wire = { workspace = true }

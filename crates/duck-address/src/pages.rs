@@ -1,12 +1,13 @@
 //! pages' half of a `duck://` address.
 //!
-//! The shared parser ([`duck_address::Address`]) reads
+//! The shared parser ([`Address`]) reads
 //! `duck://<chain>/<module>/<module-path…>` and stops at the module segment:
-//! what the tail MEANS is the module's question, so pages' answer lives here,
-//! beside the wire surface everything else links, and not in the grammar.
+//! what the tail MEANS is the module's question, and this is pages' answer. It
+//! ships here, not in `pages-wire`, so a view names a page or a block by
+//! linking this crate alone; `pages-wire` re-exports it.
 
-use duck_address::{Address, ChainId, Refused};
-use sdk::refusal::INVALID_INPUT;
+use crate::{Address, ChainId, Refused};
+use refusal_class::INVALID_INPUT;
 
 /// pages' path: `duck://<chain>/pages/<page>` or
 /// `duck://<chain>/pages/<page>/block/<block>`.

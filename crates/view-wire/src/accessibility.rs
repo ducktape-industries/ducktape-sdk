@@ -13,7 +13,7 @@ pub struct Fault {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FaultKind {
-    /// A button, or a mouse area with a role, that nothing names.
+    /// A button, a mouse area with a role, or an overlay that nothing names.
     Unnamed,
     /// A mouse area that answers a click without saying what it is.
     NoRole,
@@ -28,9 +28,10 @@ pub enum FaultKind {
 /// A mouse area answers a click when `on_press`, `on_release` or
 /// `on_double_click` is set; it is named by its `label` or by any non-empty
 /// [`Node::Text`] inside it. A button is named by a non-empty label content
-/// or `label`. [`Node::Image`], [`Node::ImageViewer`] and [`Node::Svg`] are
-/// skipped: they carry no handler, so whatever makes them interactive is the
-/// node that names them.
+/// or `label`, and an overlay by its `label` alone: the text inside a dialog
+/// is what it says, not what it is. [`Node::Image`], [`Node::ImageViewer`]
+/// and [`Node::Svg`] are skipped: they carry no handler, so whatever makes
+/// them interactive is the node that names them.
 pub fn accessibility_faults(root: &Node) -> Vec<Fault> {
     let mut faults = Vec::new();
     walk(root, None, &mut faults);
@@ -113,6 +114,7 @@ fn fault(node: &Node) -> Option<FaultKind> {
         Node::MouseArea { label, content, .. } => {
             (!named(label) && !has_text(content)).then_some(FaultKind::Unnamed)
         }
+        Node::Overlay { label, .. } => (!named(label)).then_some(FaultKind::Unnamed),
         _ => None,
     }
 }
@@ -130,7 +132,20 @@ fn has_text(node: &Node) -> bool {
 mod tests {
     use super::*;
     use crate::kit::{button, button_child, column, input, text};
-    use crate::{ButtonPreset, Role};
+    use crate::{AlignX, AlignY, ButtonPreset, Rgba, Role};
+
+    fn overlay(key: &str, label: Option<&str>) -> Node {
+        Node::Overlay {
+            key: key.into(),
+            label: label.map(Into::into),
+            padding: 0.0,
+            backdrop: Rgba([0.0; 4]),
+            align_x: AlignX::Center,
+            align_y: AlignY::Center,
+            on_dismiss: None,
+            children: vec![text(format!("{key}/t"), "Delete this page?")],
+        }
+    }
 
     fn area(key: &str, role: Option<Role>, on_press: Option<u32>, content: Node) -> Node {
         Node::MouseArea {
@@ -166,6 +181,7 @@ mod tests {
                 button_child("App/gear", Node::empty(), Some(2), ButtonPreset::Subtle),
                 text("App/dup", "a"),
                 text("App/dup", "b"),
+                overlay("App/ask", Some("")),
             ],
         );
         let at = |key: &str| vec!["App".to_owned(), key.to_owned()];
@@ -176,6 +192,7 @@ mod tests {
                 (at("App/open"), FaultKind::NoRole),
                 (at("App/gear"), FaultKind::Unnamed),
                 (at("App/dup"), FaultKind::DuplicateKey),
+                (at("App/ask"), FaultKind::Unnamed),
             ]
             .map(|(path, kind)| Fault { path, kind })
         );
@@ -194,6 +211,7 @@ mod tests {
                 button("App/gear", "Settings", Some(2), ButtonPreset::Subtle),
                 text("App/a", "a"),
                 text("App/b", "b"),
+                overlay("App/ask", Some("Delete page")),
             ],
         );
         assert_eq!(accessibility_faults(&named), Vec::<Fault>::new());

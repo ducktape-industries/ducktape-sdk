@@ -9,8 +9,8 @@ version.workspace = true
 
 [dependencies]
 sdk = { workspace = true }
-# the `duck://` grammar. pages owns what `<page>/block/<block>` means, so
-# `PageAddress` sits here; the grammar around it is one parser for everyone.
+# the `duck://` grammar and pages' half of it: `PageAddress` ships in
+# `duck-address` (so a view links it alone) and this crate re-exports it.
 duck-address = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

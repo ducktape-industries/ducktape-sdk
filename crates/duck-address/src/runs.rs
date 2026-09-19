@@ -1,18 +1,19 @@
 //! runs' half of a `duck://` address.
 //!
-//! The shared parser ([`duck_address::Address`]) reads
+//! The shared parser ([`Address`]) reads
 //! `duck://<chain>/<module>/<module-path…>` and stops at the module segment:
-//! what the tail MEANS is the module's question, so runs' answer lives here,
-//! beside the wire surface everything else links, and not in the grammar.
+//! what the tail MEANS is the module's question, and this is runs' answer. It
+//! ships here, not in `runs-wire`, so a view names a run by linking this crate
+//! alone; `runs-wire` re-exports it.
 
-use duck_address::{Address, ChainId, Refused};
-use sdk::refusal::INVALID_INPUT;
+use crate::{Address, ChainId, Refused};
+use refusal_class::INVALID_INPUT;
 
 /// runs' path: `duck://<chain>/runs/<digest>`, exactly one segment.
 ///
-/// `digest` is the run's dispatch id — [`crate::dispatch_id_for`] of its run
+/// `digest` is the run's dispatch id — runs-wire's `dispatch_id_for` of its run
 /// id, 64 lowercase hex — the id that addresses a run everywhere outside the
-/// module ([`crate::RunsViewQuery::Run`]). The run id itself carries reserved
+/// module (runs-wire's `RunsViewQuery::Run`). The run id itself carries reserved
 /// separators and is never a link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunAddress {
@@ -82,8 +83,10 @@ mod tests {
         refused.sentence
     }
 
+    /// runs-wire's `dispatch_id_for("chat\u{1f}general\u{1f}7\u{1f}bot")`;
+    /// runs-wire pins that the ids it mints are run addresses.
     fn digest() -> String {
-        crate::dispatch_id_for("chat\u{1f}general\u{1f}7\u{1f}bot")
+        "9c46c7d7d32f58a6c81451150055c5109e95fb2a1dd70d23eb564b9b1f28812a".to_string()
     }
 
     #[test]

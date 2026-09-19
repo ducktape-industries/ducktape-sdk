@@ -32,7 +32,9 @@
 /// 9: accessible names and roles: `label` on `Node::Editor`, `Slider`, `ComboBox`
 ///    and `PickList`; `role`, `label`, `expanded`, `selected` and `checked` on
 ///    `Node::MouseArea`; `selected` on `Node::Button`.
-pub const WIRE_EPOCH: u32 = 9;
+/// 10: the rest of the accessible shape: `heading` and `live` on `Node::Text`,
+///    `label` on `Node::Overlay`, `role` on `Node::Button`.
+pub const WIRE_EPOCH: u32 = 10;
 
 pub mod manifest;
 #[cfg(feature = "schema")]
@@ -123,7 +125,7 @@ mod surface;
 pub use surface::{MAX_SURFACE_DEPTH, MAX_SURFACE_VALUES, SurfaceValue, sanitize_surface_event};
 
 mod node;
-pub use node::{ButtonContent, Node, Role};
+pub use node::{ButtonContent, Live, Node, Role};
 mod accessibility;
 pub use accessibility::{Fault, FaultKind, accessibility_faults};
 mod patch;
@@ -783,7 +785,8 @@ fn text_amounts(root: &Node) -> Result<(usize, usize), &'static str> {
             | Node::ImageViewer { label, .. }
             | Node::Svg { label, .. }
             | Node::MouseArea { label, .. }
-            | Node::Slider { label, .. } => {
+            | Node::Slider { label, .. }
+            | Node::Overlay { label, .. } => {
                 if let Some(label) = label {
                     add(label);
                 }
@@ -1178,12 +1181,16 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
         }
         Node::Overlay {
             key,
+            label,
             padding,
             backdrop,
             children,
             ..
         } => {
             claim(key, taken);
+            if let Some(label) = label {
+                truncate_string(label);
+            }
             *padding = bounded(*padding);
             children.truncate(2);
             for channel in &mut backdrop.0 {
@@ -1242,11 +1249,15 @@ fn sanitize_node(node: &mut Node, depth: usize, budgets: &mut Budgets, taken: &m
             content,
             size,
             color,
+            heading,
             ..
         } => {
             claim(key, taken);
             options.sanitize(budgets);
             spend_text(content, budgets);
+            if heading.is_some_and(|level| !(1..=6).contains(&level)) {
+                *heading = None;
+            }
             // Tracking expands graphemes into native widgets. Charge a conservative
             // scalar count against the same host node budget before rendering.
             if options.tracking > 0.0 {
@@ -1928,6 +1939,8 @@ mod tests {
             font: Font::default(),
             width: None,
             align_x: None,
+            heading: None,
+            live: None,
         }
     }
 
@@ -2254,6 +2267,7 @@ mod tests {
                     checked: None,
                     expanded: None,
                     selected: None,
+                    role: None,
                     description: None,
                     key: "App/b".into(),
                     content: ButtonContent::Label("Go".into()),
@@ -2703,6 +2717,7 @@ mod tests {
                 checked: None,
                 expanded: None,
                 selected: None,
+                role: None,
                 description: Some("Details".into()),
                 key: "App/b".into(),
                 content: ButtonContent::Label(long.clone()),
@@ -2758,6 +2773,8 @@ mod tests {
                 font: Font::default(),
                 width: Some(Length::Fixed(-5.0)),
                 align_x: None,
+                heading: None,
+                live: None,
             },
             deep,
             wide,
@@ -2807,6 +2824,7 @@ mod tests {
             checked: None,
             expanded: None,
             selected: None,
+            role: None,
             description: None,
             key: "App/b".into(),
             content,
@@ -2986,6 +3004,79 @@ mod tests {
             ..Frame::default()
         };
         assert_eq!(decode::<Frame>(&encode(&frame)).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_buttons_role_round_trips() {
+        let mut link = button(ButtonContent::Label("Docs".into()));
+        let Node::Button { role, .. } = &mut link else {
+            unreachable!()
+        };
+        *role = Some(Role::Link);
+        let frame = Frame {
+            root: Some(link),
+            ..Frame::default()
+        };
+        assert_eq!(decode::<Frame>(&encode(&frame)).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_texts_heading_and_live_region_round_trip() {
+        let mut title = text("Inbox");
+        let Node::Text { heading, live, .. } = &mut title else {
+            unreachable!()
+        };
+        *heading = Some(1);
+        *live = Some(Live::Assertive);
+        let mut status = text("3 new");
+        let Node::Text { live, .. } = &mut status else {
+            unreachable!()
+        };
+        *live = Some(Live::Polite);
+        let frame = Frame {
+            root: Some(column(vec![title, status])),
+            ..Frame::default()
+        };
+        assert_eq!(decode::<Frame>(&encode(&frame)).unwrap(), frame);
+    }
+
+    #[test]
+    fn an_overlays_label_round_trips() {
+        let frame = Frame {
+            root: Some(Node::Overlay {
+                key: "App/ask".into(),
+                label: Some("Delete page".into()),
+                padding: 16.0,
+                backdrop: Rgba([0.0, 0.0, 0.0, 0.4]),
+                align_x: AlignX::Center,
+                align_y: AlignY::Center,
+                on_dismiss: Some(4),
+                children: vec![text("base"), text("Delete this page?")],
+            }),
+            ..Frame::default()
+        };
+        assert_eq!(decode::<Frame>(&encode(&frame)).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_heading_level_outside_1_to_6_is_no_heading() {
+        for (level, kept) in [
+            (0, None),
+            (1, Some(1)),
+            (6, Some(6)),
+            (7, None),
+            (255, None),
+        ] {
+            let mut node = text("Title");
+            let Node::Text { heading, .. } = &mut node else {
+                unreachable!()
+            };
+            *heading = Some(level);
+            let Node::Text { heading, .. } = sanitized_root(node) else {
+                panic!("still text")
+            };
+            assert_eq!(heading, kept, "level {level}");
+        }
     }
 
     /// Building and encoding a chain this deep recurses as far as decoding

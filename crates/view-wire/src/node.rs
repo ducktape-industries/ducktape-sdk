@@ -11,8 +11,9 @@ pub enum ButtonContent {
     Child(Box<Node>),
 }
 
-/// What a [`Node::MouseArea`] is to assistive technology. Every other
-/// interactive node's variant is its role.
+/// What a [`Node::MouseArea`] or a [`Node::Button`] is to assistive
+/// technology. Every other interactive node's variant is its role, and a
+/// button without one is a button.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     Button,
@@ -22,6 +23,16 @@ pub enum Role {
     Row,
     Checkbox,
     Switch,
+}
+
+/// How assistive technology announces a change to a [`Node::Text`] it is
+/// not focused on.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Live {
+    /// When the reader is idle.
+    Polite,
+    /// At once, interrupting.
+    Assertive,
 }
 
 /// One widget. `key` is the node's identity across frames — the
@@ -277,6 +288,10 @@ pub enum Node {
         font: Font,
         width: Option<Length>,
         align_x: Option<AlignX>,
+        /// A heading's level, 1 to 6; the sanitizer makes any other `None`.
+        heading: Option<u8>,
+        /// `None` is text whose changes are not announced.
+        live: Option<Live>,
     },
     /// A raster picture sent once per typed content hash.
     Image {
@@ -365,6 +380,8 @@ pub enum Node {
         /// The accessible name of a button whose content is not a plain
         /// label.
         label: Option<String>,
+        /// `None` is a button.
+        role: Option<Role>,
         checked: Option<bool>,
         expanded: Option<bool>,
         selected: Option<bool>,
@@ -501,6 +518,8 @@ pub enum Node {
     /// A base plus an optional modal layer. Closing removes the second child.
     Overlay {
         key: String,
+        /// The accessible name of the dialog; the variant is its role.
+        label: Option<String>,
         padding: f32,
         backdrop: Rgba,
         align_x: AlignX,

@@ -7,7 +7,6 @@
 //! program), because its types are made of theirs. Both are SDK-shaped: no
 //! `native` feature, no kernel host, no disk.
 
-mod address;
 pub mod catalog;
 mod conversation_interface;
 mod ids;
@@ -16,9 +15,9 @@ mod model;
 pub mod view;
 mod workflow;
 
-pub use address::*;
 pub use catalog::*;
 pub use conversation_interface::*;
+pub use duck_address::runs::RunAddress;
 pub use ids::*;
 pub use interface::*;
 pub use model::*;

@@ -1,12 +1,13 @@
 //! forge's half of a `duck://` address.
 //!
-//! The shared parser ([`duck_address::Address`]) reads
+//! The shared parser ([`Address`]) reads
 //! `duck://<chain>/<module>/<module-path…>` and stops at the module segment:
-//! what the tail MEANS is the module's question, so forge's answer lives here,
-//! beside the wire surface everything else links, and not in the grammar.
+//! what the tail MEANS is the module's question, and this is forge's answer. It
+//! ships here, not in `forge-wire`, so a view names a repository or something
+//! in one by linking this crate alone; `forge-wire` re-exports it.
 
-use duck_address::{Address, ChainId, Refused, number};
-use sdk::refusal::INVALID_INPUT;
+use crate::{Address, ChainId, Refused, number};
+use refusal_class::INVALID_INPUT;
 
 /// forge's path: `duck://<chain>/forge/<owner>/<repo>`.
 ///
@@ -26,10 +27,10 @@ pub struct ForgeRepoAddress {
 /// (`crates/modules/apps/forge/src/lib.rs` in the ducktape repository, the home
 /// of `norm_repo` — the validator the module and noded's git smart-HTTP layer
 /// share). Mirrored and not linked: the module lives behind the chain line in
-/// another repository, and this wire surface is what a CLI, a helper and a view
-/// link instead of it. A name this admits and the module refuses is a bug in
-/// one of the two numbers.
-const MAX_REPO_NAME_LEN: usize = 64;
+/// another repository, and this crate (re-exported by forge-wire) is what a
+/// CLI, a helper and a view link instead of it. A name this admits and the
+/// module refuses is a bug in one of the two numbers.
+pub const MAX_REPO_NAME_LEN: usize = 64;
 
 impl TryFrom<&Address> for ForgeRepoAddress {
     type Error = Refused;
@@ -94,7 +95,7 @@ pub enum ForgeTarget {
     Comment { number: u64, seq: u64 },
     /// a file at a revision: `blob/<rev>/<path…>`, the path at least one
     /// segment. `rev` is a commit id, 40 lowercase hex — the one revision
-    /// [`crate::ForgeQuery::Blob`] reads a file at besides the default head.
+    /// forge-wire's `ForgeQuery::Blob` reads a file at besides the default head.
     /// forge-wire rules no ref short name, and a branch's may carry a `/`
     /// that no segment can, so a ref is not a `rev` here.
     Blob { rev: String, path: Vec<String> },

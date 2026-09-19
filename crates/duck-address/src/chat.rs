@@ -1,12 +1,13 @@
 //! chat's half of a `duck://` address.
 //!
-//! The shared parser ([`duck_address::Address`]) reads
+//! The shared parser ([`Address`]) reads
 //! `duck://<chain>/<module>/<module-path…>` and stops at the module segment:
-//! what the tail MEANS is the module's question, so chat's answer lives here,
-//! beside the wire surface everything else links, and not in the grammar.
+//! what the tail MEANS is the module's question, and this is chat's answer. It
+//! ships here, not in `chat-wire`, so a view names a channel or a message by
+//! linking this crate alone; `chat-wire` re-exports it.
 
-use duck_address::{Address, ChainId, Refused, number};
-use sdk::refusal::INVALID_INPUT;
+use crate::{Address, ChainId, Refused, number};
+use refusal_class::INVALID_INPUT;
 
 /// chat's path: `duck://<chain>/chat/<channel>` or
 /// `duck://<chain>/chat/<channel>/<seq>` — a channel, or one message in it by

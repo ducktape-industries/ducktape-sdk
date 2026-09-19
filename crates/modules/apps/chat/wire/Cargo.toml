@@ -11,8 +11,9 @@ version.workspace = true
 
 [dependencies]
 sdk = { workspace = true }
-# the `duck://` grammar. chat owns what `<channel>/<seq>` means, so
-# `MessageAddress` sits here; the grammar around it is one parser for everyone.
+# the `duck://` grammar and chat's half of it: `MessageAddress` ships in
+# `duck-address` (so a view links it without this crate's identity graph) and
+# this crate re-exports it.
 duck-address = { workspace = true }
 chat-message = { path = "../message" }
 serde = { workspace = true }

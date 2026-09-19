@@ -149,6 +149,8 @@ mod tests {
             font: Font::default(),
             width: None,
             align_x: None,
+            heading: None,
+            live: None,
             options: TextOptions {
                 tracking: 2.0,
                 ..TextOptions::default()

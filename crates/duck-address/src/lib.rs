@@ -18,13 +18,18 @@
 //! id whole, exactly as the registry keys it.
 //!
 //! THE FIRST PATH SEGMENT NAMES A MODULE — its registered id, one of
-//! [`MODULES`] — and everything after it belongs to that module. This parser
-//! keeps the tail as segments and interprets none of it: each module's tail is
-//! a typed address in that module's wire crate (`forge-wire`'s
-//! `ForgeRepoAddress` and `ForgeLocator`, `pages-wire`'s `PageAddress`,
-//! `chat-wire`'s `MessageAddress`, `files-wire`'s `FileAddress`, `runs-wire`'s
-//! `RunAddress`), so a module's name rule has one home and this grammar does
-//! not grow a branch per module.
+//! [`MODULES`] — and everything after it belongs to that module. [`Address`]
+//! keeps the tail as segments and interprets none of it. What a tail MEANS is a
+//! typed address, one public module here per module id ([`pages::PageAddress`],
+//! [`chat::MessageAddress`], [`runs::RunAddress`], [`forge::ForgeRepoAddress`]
+//! and [`forge::ForgeLocator`]): they ship in this crate and not in each
+//! module's wire crate because a view must be able to name a thing without
+//! linking that module's signing and identity graph, which chat-wire, runs-wire
+//! and forge-wire reach and a wasm32 component cannot build. Each module's wire
+//! crate re-exports its own tail from the path it always had, so a module's
+//! name rule still has one home. files is the exception: `files-wire`'s
+//! `FileAddress` canonicalises its path with duckfs's own rule, which this
+//! dependency-free crate cannot link, and files-wire builds for wasm32 anyway.
 //!
 //! THE TAIL CARRIES ANY NAME, IN EXACTLY ONE SPELLING. A module names files
 //! and ids that are not `[a-z0-9._-]` (`보고서 Final.pdf`, `Blk_7`), so a
@@ -43,6 +48,11 @@
 //! See ducktape#2616 (design note v3) for why the grammar is this.
 
 use refusal_class::INVALID_INPUT;
+
+pub mod chat;
+pub mod forge;
+pub mod pages;
+pub mod runs;
 
 /// the scheme, spelled once.
 const SCHEME: &str = "duck://";
@@ -353,9 +363,9 @@ fn named(name: &str, spelling: &str) -> Result<(), Refused> {
 /// broke. `sentence` is a complete sentence a developer can act on: it names
 /// the rule and quotes what was refused.
 ///
-/// `new` is public: a module validating its own half of a path (forge-wire's
-/// `ForgeRepoAddress`, pages-wire's `PageAddress`, …) refuses in the same shape
-/// rather than inventing a second error type for the same grammar.
+/// `new` is public: a module validating its own half of a path (the typed
+/// tails here, files-wire's `FileAddress`) refuses in the same shape rather
+/// than inventing a second error type for the same grammar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refused {
     pub reason: &'static str,

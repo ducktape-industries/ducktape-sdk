@@ -95,3 +95,32 @@ fixture-guests-check:
 	  echo "these committed guests do not match a rebuild of their source:$$stale"; \
 	  exit 1; \
 	fi
+
+# What a wasm32 view may link. A wire crate that a view links must never reach
+# the signing/identity graph (blst does not build for wasm32, and a view has no
+# business holding keys); add a crate here when a view starts linking it.
+VIEW_LINKABLE := duck-address view-wire chat-message boards-wire files-wire pages-wire
+VIEW_FORBIDDEN := blst commonware-cryptography keyscheme identity-wire governance-wire
+
+.PHONY: view-wasm-check
+
+## builds every VIEW_LINKABLE crate for wasm32-unknown-unknown, then fails if
+## the normal wasm32 dependency tree of any of them names a VIEW_FORBIDDEN
+## crate (the build alone catches blst, not an identity crate that compiles).
+view-wasm-check:
+	@for crate in $(VIEW_LINKABLE); do \
+	  $(CARGO) build --target wasm32-unknown-unknown -p $$crate || exit 1; \
+	done; \
+	reached=""; \
+	for crate in $(VIEW_LINKABLE); do \
+	  tree=$$($(CARGO) tree --target wasm32-unknown-unknown -e normal -p $$crate --prefix none) || exit 1; \
+	  for dep in $(VIEW_FORBIDDEN); do \
+	    if echo "$$tree" | grep -q "^$$dep v"; then reached="$$reached $$crate->$$dep"; fi; \
+	  done; \
+	done; \
+	if [ -z "$$reached" ]; then \
+	  echo "every view-linkable crate builds for wasm32 and stays off the signing/identity graph"; \
+	else \
+	  echo "view-linkable crates reach the signing/identity graph:$$reached"; \
+	  exit 1; \
+	fi

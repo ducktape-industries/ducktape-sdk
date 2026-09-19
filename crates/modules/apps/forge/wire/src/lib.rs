@@ -17,9 +17,8 @@
 
 use serde::{Deserialize, Serialize};
 
-mod address;
 mod tracker_iface;
-pub use address::*;
+pub use duck_address::forge::{ForgeLocator, ForgeRepoAddress, ForgeTarget, MAX_REPO_NAME_LEN};
 pub use tracker_iface::*;
 
 /// a write intent at forge.

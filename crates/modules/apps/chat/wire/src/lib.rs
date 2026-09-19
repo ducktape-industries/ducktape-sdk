@@ -21,8 +21,7 @@ pub mod index;
 pub mod client;
 
 // chat's half of a `duck://` address.
-mod address;
-pub use address::*;
+pub use duck_address::chat::MessageAddress;
 
 pub const DEFAULT_CHAT_TARGET: &str = "chat";
 

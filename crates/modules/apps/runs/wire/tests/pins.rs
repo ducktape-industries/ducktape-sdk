@@ -19,3 +19,16 @@ fn pages_title_limit_is_the_one_pages_enforces() {
          its limit, update runs-wire's copy — do not relax this test.",
     );
 }
+
+/// `duck-address` cannot name this crate, so `RunAddress` copies the shape of
+/// a dispatch id (64 lowercase hex) instead of calling `dispatch_id_for`. This
+/// pins the copy: every id this crate mints is a run address.
+#[test]
+fn a_dispatch_id_is_a_run_address() {
+    let chain: duck_address::ChainId = "dognet-b5b6ea90".parse().expect("a chain id parses");
+    let run = runs_wire::RunAddress {
+        digest: runs_wire::dispatch_id_for("chat\u{1f}general\u{1f}7\u{1f}bot"),
+    };
+    let printed = run.address(chain).expect("prints");
+    assert_eq!(runs_wire::RunAddress::try_from(&printed), Ok(run));
+}
