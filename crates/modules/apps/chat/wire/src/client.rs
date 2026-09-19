@@ -69,10 +69,6 @@ pub struct ChatReaction {
     pub emoji: String,
     pub count: i64,
     pub reacted_by_me: bool,
-    /// Internal membership facts observed since this aggregate was hydrated;
-    /// absent handles carry a NUL prefix. This is not the full reactor set and
-    /// is never rendered.
-    pub reactors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -500,13 +496,19 @@ pub enum ChatDelta {
         channel_id: String,
         seq: i64,
     },
-    Reaction {
+    /// A reaction op cannot be folded from a count-only summary: add/remove
+    /// are idempotent and one viewer may own both account and exact-key rows.
+    /// The shell reloads this one canonical row with the viewer's handles.
+    MessageRefresh {
         channel_id: String,
         seq: i64,
-        emoji: String,
-        added: bool,
-        reactor: String,
-        by_me: bool,
+    },
+    /// Completion of a `MessageRefresh`. Keeping the channel on the result
+    /// lets the shell discard a read that finished after navigation.
+    MessageUpdated {
+        channel_id: String,
+        seq: i64,
+        message: ChatMessage,
     },
     Membership {
         channel_id: String,
@@ -703,29 +705,17 @@ pub fn delta_from_op(
             seq: number_i64(seq),
         },
         ChatMsg::AddReaction {
-            channel_id,
-            seq,
-            emoji,
-        } => reaction_delta(
-            channel_id,
-            seq,
-            emoji,
-            true,
-            decode_stamp(assigned)?.participant()?,
-            reader,
-        ),
-        ChatMsg::RemoveReaction {
-            channel_id,
-            seq,
-            emoji,
-        } => reaction_delta(
-            channel_id,
-            seq,
-            emoji,
-            false,
-            decode_stamp(assigned)?.participant()?,
-            reader,
-        ),
+            channel_id, seq, ..
+        }
+        | ChatMsg::RemoveReaction {
+            channel_id, seq, ..
+        } => {
+            let _ = decode_stamp(assigned)?.participant()?;
+            ChatDelta::MessageRefresh {
+                channel_id,
+                seq: number_i64(seq),
+            }
+        }
         ChatMsg::RegisterHook { .. } | ChatMsg::UnregisterHook { .. } => return Ok(None),
         ChatMsg::SetMembership {
             channel_id,
@@ -747,28 +737,6 @@ pub fn delta_from_op(
         | ChatMsg::SweepHuddle { channel_id, .. } => ChatDelta::ChannelRefresh { channel_id },
     };
     Ok(Some(delta))
-}
-
-fn reaction_delta(
-    channel_id: String,
-    seq: u64,
-    emoji: String,
-    added: bool,
-    actor: &Party,
-    reader: ChatReader<'_>,
-) -> ChatDelta {
-    let reactor = index::party_handle(actor);
-    // The module stamps the current account when one exists, while historic
-    // bare-key reactions remain owned only by that exact signing key.
-    let by_me = reader.is_me(&reactor);
-    ChatDelta::Reaction {
-        channel_id,
-        seq: number_i64(seq),
-        emoji,
-        added,
-        reactor,
-        by_me,
-    }
 }
 
 fn decode_stamp(assigned: Option<&serde_json::Value>) -> Result<ChatAssigned, String> {
@@ -873,91 +841,63 @@ pub fn tombstone_message(mut messages: Vec<ChatMessage>, seq: i64) -> Vec<ChatMe
     messages
 }
 
-/// Apply one reaction membership delta to a possibly hydrated aggregate.
-/// `reactors` only knows deltas observed since hydration, so it deduplicates
-/// optimistic/add replays without replacing the authoritative aggregate count.
-pub fn merge_message_reaction(
+/// Replace one displayed row with the canonical row loaded for a
+/// [`ChatDelta::MessageRefresh`], preserving its client-only list identity.
+pub fn merge_message_refresh(
     mut messages: Vec<ChatMessage>,
     seq: i64,
-    emoji: &str,
-    added: bool,
-    reactor: &str,
-    by_me: bool,
+    mut canonical: ChatMessage,
 ) -> Vec<ChatMessage> {
-    let Some(row) = messages
+    if canonical.pending || canonical.seq != seq {
+        return messages;
+    }
+    let Some(index) = messages
         .iter_mut()
-        .find(|message| !message.pending && message.seq == seq)
+        .position(|message| !message.pending && message.seq == seq)
     else {
         return messages;
     };
-    if row.deleted {
+    canonical.view_key = messages[index].view_key;
+    messages[index] = canonical;
+    mark_message_groups(&mut messages);
+    messages
+}
+
+/// Paint the viewer's reaction tap while the op is in flight. The applied op
+/// settles through [`ChatDelta::MessageRefresh`], never through another local
+/// count guess.
+pub fn optimistic_reaction(
+    mut messages: Vec<ChatMessage>,
+    seq: i64,
+    emoji: String,
+    added: bool,
+) -> Vec<ChatMessage> {
+    let Some(row) = messages
+        .iter_mut()
+        .find(|message| !message.pending && message.seq == seq && !message.deleted)
+    else {
         return messages;
-    }
+    };
     match row
         .reactions
         .iter_mut()
         .find(|reaction| reaction.emoji == emoji)
     {
-        Some(reaction) => {
-            let absent = format!("\0{reactor}");
-            let observed = reaction.reactors.iter().find_map(|current| {
-                (current == reactor)
-                    .then_some(true)
-                    .or_else(|| (current == &absent).then_some(false))
-            });
-            // A first non-viewer delta tells us the prior state by direction;
-            // the hydrated viewer bit supplies that fact for the local party.
-            let was_present = if by_me {
-                reaction.reacted_by_me
-            } else {
-                observed.unwrap_or(!added)
-            };
-            let changed = was_present != added;
-            reaction
-                .reactors
-                .retain(|current| current != reactor && current != &absent);
-            reaction
-                .reactors
-                .push(if added { reactor.into() } else { absent });
-            if changed {
-                reaction.count = if added {
-                    reaction.count.saturating_add(1)
-                } else {
-                    reaction.count.saturating_sub(1)
-                };
-            }
-            if by_me {
-                reaction.reacted_by_me = added;
-            }
+        Some(reaction) if reaction.reacted_by_me != added => {
+            reaction.reacted_by_me = added;
+            reaction.count = (reaction.count + if added { 1 } else { -1 }).max(0);
         }
+        Some(_) => return messages,
         None if added => row.reactions.push(ChatReaction {
-            emoji: emoji.into(),
+            emoji,
             count: 1,
-            reacted_by_me: by_me,
-            reactors: vec![reactor.into()],
+            reacted_by_me: true,
         }),
-        // a remove of an emoji the row never had touched nothing: no rescan,
-        // no bump.
         None => return messages,
     }
     row.reactions.retain(|reaction| reaction.count > 0);
     row.bump_render_rev();
     messages
-}
-
-/// The optimistic half of a reaction tap: the SAME reactor-set fold the live
-/// delta rides, applied locally before the op is submitted. `reactor` must be
-/// the canonical participant handle (`acct:{n}` or `user:{hex}`) — set
-/// semantics then make the real delta's replay a no-op instead of a double
-/// count.
-pub fn optimistic_reaction(
-    messages: Vec<ChatMessage>,
-    seq: i64,
-    emoji: String,
-    added: bool,
-    reactor: String,
-) -> Vec<ChatMessage> {
-    merge_message_reaction(messages, seq, &emoji, added, &reactor, true)
 }
 
 // ============================================================================
@@ -1262,7 +1202,6 @@ pub fn chat_message(row: MsgRow, reader: ChatReader<'_>, chain: &ChainId) -> Cha
                 emoji: reaction.emoji,
                 count: count_i64(reaction.count as usize),
                 reacted_by_me: reaction.reacted_by_me,
-                reactors: Vec::new(),
             })
             .collect(),
         render_rev: 0,
@@ -2147,13 +2086,12 @@ mod tests {
         // emoji the row never had touches nothing.
         let messages = vec![committed(3, "a")];
         let before = messages[0].render_rev;
-        let added = optimistic_reaction(messages, 3, "👍".into(), true, "user:ab".into());
+        let added = optimistic_reaction(messages, 3, "👍".into(), true);
         assert_ne!(added[0].render_rev, before, "a reaction add bumps");
         let mid = added[0].render_rev;
-        let removed = optimistic_reaction(added, 3, "👍".into(), false, "user:ab".into());
+        let removed = optimistic_reaction(added, 3, "👍".into(), false);
         assert_ne!(removed[0].render_rev, mid, "a reaction remove bumps");
-        let untouched =
-            optimistic_reaction(removed.clone(), 3, "🎉".into(), false, "user:ab".into());
+        let untouched = optimistic_reaction(removed.clone(), 3, "🎉".into(), false);
         assert_eq!(
             untouched[0].render_rev, removed[0].render_rev,
             "a remove of an absent emoji is a no-op"
@@ -2187,78 +2125,65 @@ mod tests {
     }
 
     #[test]
-    fn hydrated_reaction_summary_keeps_its_aggregate_through_deltas() {
+    fn canonical_reaction_refresh_settles_optimism_without_guessing() {
         let mut message = committed(7, "alice");
         message.reactions.push(ChatReaction {
             emoji: "👍".into(),
             count: 3,
             reacted_by_me: false,
-            reactors: Vec::new(),
         });
+        let view_key = message.view_key;
+        let optimistic = optimistic_reaction(vec![message.clone()], 7, "👍".into(), true);
+        assert_eq!(optimistic[0].reactions[0].count, 4);
+        assert!(optimistic[0].reactions[0].reacted_by_me);
 
-        let added = merge_message_reaction(vec![message], 7, "👍", true, "user:other", false);
-        assert_eq!(added[0].reactions[0].count, 4);
-        let replayed = merge_message_reaction(added, 7, "👍", true, "user:other", false);
-        assert_eq!(replayed[0].reactions[0].count, 4);
-        let removed = merge_message_reaction(replayed, 7, "👍", false, "user:other", false);
-        assert_eq!(removed[0].reactions[0].count, 3);
-        let replayed = merge_message_reaction(removed, 7, "👍", false, "user:other", false);
-        assert_eq!(replayed[0].reactions[0].count, 3);
-
-        let mut non_viewer = committed(9, "alice");
-        non_viewer.reactions.push(ChatReaction {
-            emoji: "👍".into(),
-            count: 3,
-            reacted_by_me: false,
-            reactors: Vec::new(),
-        });
-        let removed = merge_message_reaction(vec![non_viewer], 9, "👍", false, "user:other", false);
-        assert_eq!(removed[0].reactions[0].count, 2);
-        let replayed = merge_message_reaction(removed, 9, "👍", false, "user:other", false);
-        assert_eq!(replayed[0].reactions[0].count, 2);
-        let added = merge_message_reaction(replayed, 9, "👍", true, "user:other", false);
-        assert_eq!(added[0].reactions[0].count, 3);
-        let replayed = merge_message_reaction(added, 9, "👍", true, "user:other", false);
-        assert_eq!(replayed[0].reactions[0].count, 3);
-
-        let mut mine = committed(8, "alice");
-        mine.reactions.push(ChatReaction {
-            emoji: "👍".into(),
-            count: 3,
-            reacted_by_me: true,
-            reactors: Vec::new(),
-        });
-        let removed = merge_message_reaction(vec![mine], 8, "👍", false, "acct:7", true);
-        assert_eq!(removed[0].reactions[0].count, 2);
-        assert!(!removed[0].reactions[0].reacted_by_me);
-        let replayed = merge_message_reaction(removed, 8, "👍", false, "acct:7", true);
-        assert_eq!(replayed[0].reactions[0].count, 2);
+        // A duplicate canonical add is a no-op: replacing with its hydrated
+        // row restores the authoritative aggregate and viewer OR bit.
+        let settled = merge_message_refresh(optimistic, 7, message);
+        assert_eq!(settled[0].view_key, view_key);
+        assert_eq!(settled[0].reactions[0].count, 3);
+        assert!(!settled[0].reactions[0].reacted_by_me);
     }
 
     #[test]
-    fn reaction_delta_matches_current_account_or_exact_key_only() {
-        let key = [0xaau8; 32];
-        let names = NameDirectory::new(BTreeMap::from([(
-            hex_encode(&key),
-            BoundAccount {
-                number: 7,
-                name: "me".into(),
+    fn reaction_ops_request_a_canonical_message_refresh() {
+        let assigned = serde_json::to_value(ChatAssigned::Participant {
+            actor: Party::Account(7),
+            participant: Party::Account(7),
+        })
+        .unwrap();
+        for msg in [
+            ChatMsg::AddReaction {
+                channel_id: "g".into(),
+                seq: 3,
+                emoji: "👍".into(),
             },
-        )]));
-        let reader = ChatReader::new(Some(&key), &names);
-        let by_me = |actor: Party| {
-            let ChatDelta::Reaction { by_me, .. } =
-                reaction_delta("g".into(), 1, "👍".into(), true, &actor, reader)
-            else {
-                unreachable!()
-            };
-            by_me
-        };
-
-        assert!(by_me(Party::Account(7)));
-        assert!(by_me(Party::Key(key.to_vec())));
-        assert!(!by_me(Party::Key(vec![0xbb; 32])));
-        assert!(!by_me(Party::Account(8)));
+            ChatMsg::RemoveReaction {
+                channel_id: "g".into(),
+                seq: 3,
+                emoji: "👍".into(),
+            },
+        ] {
+            let payload = serde_json::to_vec(&msg).unwrap();
+            let delta = delta_from_op(
+                &payload,
+                Some(&assigned),
+                "external",
+                None,
+                ChatReader::nobody(),
+                &chain(),
+                1,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(matches!(
+                delta,
+                ChatDelta::MessageRefresh {
+                    channel_id,
+                    seq: 3
+                } if channel_id == "g"
+            ));
+        }
     }
 
     /// Construction seeds `render_rev` from the rendered content, so a

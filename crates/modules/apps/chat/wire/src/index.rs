@@ -2286,11 +2286,19 @@ mod tests {
         assert!(rows.is_empty(), "a tombstone carries no reactions");
     }
 
-    fn add_reaction_as(map: &mut Map, height: u64, party: Party, emoji: &str) {
-        let msg = ChatMsg::AddReaction {
-            channel_id: "g".into(),
-            seq: 1,
-            emoji: emoji.into(),
+    fn reaction_as(map: &mut Map, height: u64, party: Party, emoji: &str, added: bool) {
+        let msg = if added {
+            ChatMsg::AddReaction {
+                channel_id: "g".into(),
+                seq: 1,
+                emoji: emoji.into(),
+            }
+        } else {
+            ChatMsg::RemoveReaction {
+                channel_id: "g".into(),
+                seq: 1,
+                emoji: emoji.into(),
+            }
         };
         let writes = fold_op(
             &op_with(
@@ -2311,25 +2319,40 @@ mod tests {
     fn message_reactions_hydrate_account_and_exact_key_ownership() {
         let mut map = Map::new();
         fold(&mut map, 1, &post("g", "m1", "react to me"));
-        add_reaction_as(&mut map, 2, Party::Account(7), "👍");
-        add_reaction_as(&mut map, 3, Party::Key(b"historic".to_vec()), "👍");
+        reaction_as(&mut map, 2, Party::Account(7), "👍", true);
+        reaction_as(&mut map, 3, Party::Account(7), "👍", true);
+        reaction_as(&mut map, 4, Party::Key(b"historic".to_vec()), "👍", true);
 
-        let reacted = |viewer_handles: &[&str]| {
+        let summary = |map: &Map, viewer_handles: &[&str]| {
             let reply = view(
-                &map,
-                serde_json::json!({"message": {
-                    "message_id": "m1",
-                    "viewer_handles": viewer_handles
+                map,
+                serde_json::json!({"messages_around": {
+                    "channel_id": "g",
+                    "seq": 1,
+                    "viewer_handles": viewer_handles,
+                    "limit": 1
                 }}),
             );
-            let ChatViewReply::Message(Some(row)) = reply else {
-                panic!("message lookup")
+            let ChatViewReply::Messages(rows) = reply else {
+                panic!("message refresh")
             };
-            row.reactions[0].reacted_by_me
+            rows[0]
+                .reactions
+                .first()
+                .map(|reaction| (reaction.count, reaction.reacted_by_me))
         };
-        assert!(reacted(&["user:active", "acct:7"]));
-        assert!(reacted(&["user:historic"]));
-        assert!(!reacted(&["user:other"]));
+        assert_eq!(summary(&map, &["user:active", "acct:7"]), Some((2, true)));
+        assert_eq!(summary(&map, &["user:historic"]), Some((2, true)));
+        assert_eq!(summary(&map, &["user:other"]), Some((2, false)));
+
+        // The viewer owns both canonical handles. Removing one keeps the OR
+        // bit true; replaying that idempotent remove changes nothing.
+        reaction_as(&mut map, 5, Party::Account(7), "👍", false);
+        assert_eq!(summary(&map, &["user:historic", "acct:7"]), Some((1, true)));
+        reaction_as(&mut map, 6, Party::Account(7), "👍", false);
+        assert_eq!(summary(&map, &["user:historic", "acct:7"]), Some((1, true)));
+        reaction_as(&mut map, 7, Party::Key(b"historic".to_vec()), "👍", false);
+        assert_eq!(summary(&map, &["user:historic", "acct:7"]), None);
 
         for handles in [
             serde_json::json!([]),
