@@ -75,6 +75,38 @@ pub mod radius {
     pub const PILL: f64 = 999.;
 }
 
+/// Gaps and insets, in pixels. One ladder: every gap the kit's builders open
+/// and every edge they pad is a step on it, so a view names the step instead
+/// of the number.
+pub mod spacing {
+    /// the tightest gap: a row's own inset, two lines that belong together
+    pub const XXS: f64 = 4.;
+    /// a label over the thing it names: a field, a stacked key/value
+    pub const XS: f64 = 6.;
+    /// the default gap between siblings in a row or a column
+    pub const SM: f64 = 8.;
+    /// a gap that separates without opening a section
+    pub const MD: f64 = 10.;
+    /// a card's inset, and the gap between a label and its value
+    pub const LG: f64 = 12.;
+    /// a section inset: what an empty state or a centred block sits in
+    pub const XL: f64 = 24.;
+}
+
+/// What one line of the kit occupies, in pixels, so a view can reserve or
+/// virtualize space without measuring text. Each is the type size the
+/// builder draws plus the inset it pads with — change a builder's padding
+/// and change the constant with it.
+pub mod height {
+    use super::{spacing, type_scale};
+    /// a list row: one body line inside `kit::list_row`'s inset
+    pub const ROW: f64 = type_scale::BODY + 2. * spacing::XXS;
+    /// a control on one line — a button, an input. The native kit fixes no
+    /// height on either, so this is what one costs a layout: a body line
+    /// inside the control inset.
+    pub const CONTROL: f64 = type_scale::BODY + 2. * spacing::SM;
+}
+
 /// One sRGB color as the wire carries it: `[r, g, b, a]` in `0.0..=1.0`.
 pub type Color = [f32; 4];
 
@@ -372,6 +404,21 @@ mod tests {
                 "{asset} is not a TrueType/OpenType file"
             );
         }
+    }
+
+    #[test]
+    fn a_line_height_is_its_type_size_inside_its_own_inset() {
+        assert_eq!(height::ROW, type_scale::BODY + 2. * spacing::XXS);
+        assert_eq!(height::CONTROL, type_scale::BODY + 2. * spacing::SM);
+        let scale = [
+            spacing::XXS,
+            spacing::XS,
+            spacing::SM,
+            spacing::MD,
+            spacing::LG,
+            spacing::XL,
+        ];
+        assert!(scale.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

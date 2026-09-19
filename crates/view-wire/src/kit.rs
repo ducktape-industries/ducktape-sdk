@@ -11,7 +11,7 @@ use crate as wire;
 use crate::{Axis, ButtonContent, ButtonPreset, Length, Node, Role};
 
 pub use design::Palette;
-pub use design::{radius, type_scale};
+pub use design::{height, radius, spacing, type_scale};
 
 thread_local! {
     static DARK: Cell<bool> = const { Cell::new(false) };
@@ -212,6 +212,29 @@ pub fn nowrap(mut node: Node) -> Node {
     node
 }
 
+/// Cut `text` to `max_chars` and mark the cut with `…`, which counts toward
+/// the bound: the result is never longer than `max_chars`, and a text that
+/// already fits comes back untouched. `max_chars == 0` gives an empty string.
+///
+/// COUNTED IN `char`s, not graphemes and not display width: the wire carries
+/// no measured text, so a view that must fit a column picks a count, and a
+/// wide or combining run still draws wider than a narrow one.
+pub fn ellipsize(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    text.chars().take(max_chars - 1).chain(Some('…')).collect()
+}
+
+/// One line of text cut to a count: what a name, a path or a title reads as
+/// in a column too narrow for it. See [`ellipsize`] for what the count means.
+pub fn truncated(key: impl Into<String>, content: &str, max_chars: usize) -> Node {
+    nowrap(text(key, ellipsize(content, max_chars)))
+}
+
 // ---------- tones ----------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,7 +285,7 @@ fn linear(key: String, axis: Axis, children: Vec<Node>) -> Node {
         key,
         axis,
         children,
-        spacing: Some(8.),
+        spacing: Some(spacing::SM as f32),
         padding: None,
         width: Some(Length::Fill),
         height: None,
@@ -378,7 +401,7 @@ pub fn card(key: impl Into<String>, child: Node) -> Node {
     };
     *background = Some(wire::Background::Color(rgba(p.background)));
     *value = Some(border(p.border, design::radius::CARD as f32));
-    *padding = Some(wire::Edges::all(12.));
+    *padding = Some(wire::Edges::all(spacing::LG as f32));
     node
 }
 
@@ -398,10 +421,10 @@ pub fn notice(key: impl Into<String>, child: Node, tone: Tone) -> Node {
     *background = Some(wire::Background::Color(rgba(tone.wash(p))));
     *value = Some(border(tone.color(p), design::radius::CARD as f32));
     *padding = Some(wire::Edges {
-        top: 8.,
-        right: 12.,
-        bottom: 8.,
-        left: 12.,
+        top: spacing::SM as f32,
+        right: spacing::LG as f32,
+        bottom: spacing::SM as f32,
+        left: spacing::LG as f32,
     });
     node
 }
@@ -441,7 +464,7 @@ pub fn page(key: impl Into<String>, children: impl IntoIterator<Item = Node>) ->
         unreachable!()
     };
     *padding = Some(wire::Edges::all(20.));
-    *spacing = Some(12.);
+    *spacing = Some(spacing::LG as f32);
     *height = Some(Length::Fill);
     node
 }
@@ -475,8 +498,22 @@ pub fn kv(key: impl Into<String>, name: impl Into<String>, value: Node) -> Node 
         unreachable!()
     };
     *align = Some(wire::AlignX::Left);
-    *spacing = Some(12.);
+    *spacing = Some(spacing::LG as f32);
     node
+}
+
+/// A key/value pair stacked: the same muted label as [`kv`], over the value,
+/// with no column to line up against. What [`kv`] becomes where the label
+/// would eat the width — the view chooses, since the wire says nothing about
+/// how wide the pair landed.
+pub fn kv_stacked(key: impl Into<String>, name: impl Into<String>, value: Node) -> Node {
+    let key = key.into();
+    let mut label = secondary(format!("{key}/label"), name);
+    let Node::Text { options, .. } = &mut label else {
+        unreachable!()
+    };
+    options.wrapping = Some(wire::Wrapping::None);
+    spaced(column(key, [label, value]), spacing::XS as f32)
 }
 
 /// A small tag: a count, a state, a kind.
@@ -514,9 +551,9 @@ pub fn badge(key: impl Into<String>, content: impl Into<String>, tone: Tone) -> 
     });
     *padding = Some(wire::Edges {
         top: 1.,
-        right: 6.,
+        right: spacing::XS as f32,
         bottom: 1.,
-        left: 6.,
+        left: spacing::XS as f32,
     });
     *width = Some(Length::Shrink);
     node
@@ -582,7 +619,21 @@ pub fn empty_state(
     title: impl Into<String>,
     detail: impl Into<String>,
 ) -> Node {
-    let key = key.into();
+    empty_body(key.into(), title.into(), detail.into(), None)
+}
+
+/// An empty state a view can act on: the same block with the way out under
+/// the detail — a retry, a create, a link.
+pub fn empty_state_action(
+    key: impl Into<String>,
+    title: impl Into<String>,
+    detail: impl Into<String>,
+    action: Node,
+) -> Node {
+    empty_body(key.into(), title.into(), detail.into(), Some(action))
+}
+
+fn empty_body(key: String, title: String, detail: String, action: Option<Node>) -> Node {
     let mut node = column(
         key.clone(),
         [
@@ -594,22 +645,24 @@ pub fn empty_state(
                 wire::Weight::Medium,
             ),
             wrapping(secondary(format!("{key}/detail"), detail)),
-        ],
+        ]
+        .into_iter()
+        .chain(action),
     );
     let Node::Linear {
         padding,
         max_width,
         align,
-        spacing,
+        spacing: gap,
         ..
     } = &mut node
     else {
         unreachable!()
     };
-    *padding = Some(wire::Edges::all(24.));
+    *padding = Some(wire::Edges::all(spacing::XL as f32));
     *max_width = Some(420.);
     *align = Some(wire::AlignX::Left);
-    *spacing = Some(4.);
+    *gap = Some(spacing::XXS as f32);
     node
 }
 
@@ -618,7 +671,7 @@ pub fn field(key: impl Into<String>, name: impl Into<String>, control: Node) -> 
     let key = key.into();
     spaced(
         column(key.clone(), [label(format!("{key}/label"), name), control]),
-        6.,
+        spacing::XS as f32,
     )
 }
 
@@ -664,10 +717,10 @@ pub fn list_row(key: impl Into<String>, child: Node, chosen: bool, on_press: Opt
     *checked = Some(chosen);
     *width = Some(Length::Fill);
     *padding = Some(wire::Edges {
-        top: 4.,
-        right: 8.,
-        bottom: 4.,
-        left: 8.,
+        top: spacing::XXS as f32,
+        right: spacing::SM as f32,
+        bottom: spacing::XXS as f32,
+        left: spacing::SM as f32,
     });
     button
 }
@@ -925,6 +978,152 @@ mod tests {
         assert_eq!(width, Some(Length::Fill));
         assert_eq!(style.preset, ButtonPreset::Subtle);
         assert_eq!(on_press, Some(3));
+    }
+
+    #[test]
+    fn ellipsize_cuts_on_a_char_boundary_and_counts_its_own_mark() {
+        let emoji = "🦆🦆🦆";
+        for (text, max, want) in [
+            ("short", 10, "short"),
+            ("exact", 5, "exact"),
+            ("truncate me", 5, "trun…"),
+            ("", 0, ""),
+            ("a", 0, ""),
+            ("ab", 1, "…"),
+            ("a", 1, "a"),
+            ("오리테이프", 3, "오리…"),
+            ("오리테이프", 5, "오리테이프"),
+            (emoji, 2, "🦆…"),
+            (emoji, 1, "…"),
+        ] {
+            let got = ellipsize(text, max);
+            assert_eq!(got, want, "ellipsize({text:?}, {max})");
+            assert!(
+                got.chars().count() <= max,
+                "the mark counts toward the bound"
+            );
+        }
+        let Node::Text {
+            content, options, ..
+        } = truncated("t", "truncate me", 5)
+        else {
+            panic!("text")
+        };
+        assert_eq!(content, "trun…");
+        assert_eq!(options.wrapping, Some(wire::Wrapping::None));
+    }
+
+    #[test]
+    fn a_stacked_pair_is_the_kv_label_over_its_value_with_no_column() {
+        let node = kv_stacked("k", "Height", text("k/value", "42"));
+        let Node::Linear {
+            axis,
+            children,
+            spacing: gap,
+            ..
+        } = node
+        else {
+            panic!("column")
+        };
+        assert_eq!(axis, Axis::Column);
+        assert_eq!(gap, Some(spacing::XS as f32));
+        let [label, value] = &children[..] else {
+            panic!("label over value")
+        };
+        let Node::Text {
+            key,
+            content,
+            width,
+            size,
+            ..
+        } = label
+        else {
+            panic!("text")
+        };
+        assert_eq!((key.as_str(), content.as_str()), ("k/label", "Height"));
+        assert_eq!(*size, Some(type_scale::SECONDARY as f32));
+        assert_eq!(*width, None, "a stacked label claims no column");
+        assert!(matches!(value, Node::Text { content, .. } if content == "42"));
+    }
+
+    #[test]
+    fn an_empty_state_carries_its_action_last_and_is_otherwise_unchanged() {
+        let plain = empty_state("e", "Nothing here", "Add one to begin.");
+        let acting = empty_state_action(
+            "e",
+            "Nothing here",
+            "Add one to begin.",
+            button("e/retry", "Retry", Some(1), ButtonPreset::Subtle),
+        );
+        let (
+            Node::Linear {
+                children: plain, ..
+            },
+            Node::Linear {
+                children: acting, ..
+            },
+        ) = (plain, acting)
+        else {
+            panic!("column")
+        };
+        assert_eq!(plain.len(), 2);
+        assert_eq!(acting.len(), 3);
+        assert_eq!(plain[..], acting[..2]);
+        assert!(matches!(&acting[2], Node::Button { key, .. } if key == "e/retry"));
+    }
+
+    #[test]
+    fn the_tokens_draw_what_the_literals_drew() {
+        let edges = |top, right, bottom, left| {
+            Some(wire::Edges {
+                top,
+                right,
+                bottom,
+                left,
+            })
+        };
+        let Node::Linear { spacing, .. } = row("r", []) else {
+            panic!("row")
+        };
+        assert_eq!(spacing, Some(8.));
+        let Node::Container { padding, .. } = card("c", text("t", "x")) else {
+            panic!("container")
+        };
+        assert_eq!(padding, edges(12., 12., 12., 12.));
+        let Node::Container { padding, .. } = notice("n", text("t", "x"), Tone::Warning) else {
+            panic!("container")
+        };
+        assert_eq!(padding, edges(8., 12., 8., 12.));
+        let Node::Container { padding, .. } = badge("b", "3", Tone::Neutral) else {
+            panic!("container")
+        };
+        assert_eq!(padding, edges(1., 6., 1., 6.));
+        let Node::Button { padding, .. } = list_row("r", text("t", "Row"), false, None) else {
+            panic!("button")
+        };
+        assert_eq!(padding, edges(4., 8., 4., 8.));
+        let Node::Linear {
+            padding, spacing, ..
+        } = page("p", [])
+        else {
+            panic!("column")
+        };
+        assert_eq!((padding, spacing), (edges(20., 20., 20., 20.), Some(12.)));
+        let Node::Linear { spacing, .. } = kv("k", "Name", text("v", "x")) else {
+            panic!("row")
+        };
+        assert_eq!(spacing, Some(12.));
+        let Node::Linear { spacing, .. } = field("f", "Name", text("v", "x")) else {
+            panic!("column")
+        };
+        assert_eq!(spacing, Some(6.));
+        let Node::Linear {
+            padding, spacing, ..
+        } = empty_state("e", "Nothing", "Add one.")
+        else {
+            panic!("column")
+        };
+        assert_eq!((padding, spacing), (edges(24., 24., 24., 24.), Some(4.)));
     }
 
     #[test]
