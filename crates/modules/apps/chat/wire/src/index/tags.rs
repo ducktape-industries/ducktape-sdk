@@ -297,12 +297,60 @@ fn decode_tok(value: &[u8]) -> Result<TokRef, Fail> {
     serde_json::from_slice(value).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
 }
 
-fn validate_cursor(after: Option<&str>, prefix: &str) -> Result<(), Fail> {
-    if after.is_some_and(|cursor| !cursor.starts_with(prefix)) {
-        return Err(Fail::new(
-            FAIL_BAD_REQUEST,
-            "cursor is outside this tag scope",
-        ));
+fn fixed_hex(value: &str) -> bool {
+    value.len() == 16
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn validate_rank_cursor(after: Option<&str>, prefix: &str) -> Result<(), Fail> {
+    let Some(cursor) = after else {
+        return Ok(());
+    };
+    let Some((count, label)) = cursor
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.split_once('/'))
+    else {
+        return Err(Fail::new(FAIL_BAD_REQUEST, "invalid tag cursor"));
+    };
+    if !fixed_hex(count)
+        || label.is_empty()
+        || label.chars().count() > MAX_TAG_CHARS
+        || !label.chars().all(is_tag_char)
+        || normalize(label) != label
+    {
+        return Err(Fail::new(FAIL_BAD_REQUEST, "invalid tag cursor"));
+    }
+    Ok(())
+}
+
+fn validate_posting_cursor(
+    after: Option<&str>,
+    prefix: &str,
+    channel_scoped: bool,
+) -> Result<(), Fail> {
+    let Some(cursor) = after else {
+        return Ok(());
+    };
+    let Some(rest) = cursor.strip_prefix(prefix) else {
+        return Err(Fail::new(FAIL_BAD_REQUEST, "invalid tag cursor"));
+    };
+    let parts: Vec<_> = rest.split('/').collect();
+    let valid = match parts.as_slice() {
+        [time, seq] if channel_scoped => fixed_hex(time) && fixed_hex(seq),
+        [time, channel, seq] if !channel_scoped => {
+            fixed_hex(time)
+                && channel.len() % 2 == 0
+                && channel
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                && fixed_hex(seq)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(Fail::new(FAIL_BAD_REQUEST, "invalid tag cursor"));
     }
     Ok(())
 }
@@ -323,7 +371,7 @@ pub(super) fn serve_tags(
         Some(channel) => format!("tagrank/c/{}/", hex_lower(channel.as_bytes())),
         None => "tagrank/g/".into(),
     };
-    validate_cursor(after.as_deref(), &prefix)?;
+    validate_rank_cursor(after.as_deref(), &prefix)?;
     let page = read.scan_page(
         prefix.as_bytes(),
         after.as_deref().map(str::as_bytes),
@@ -382,7 +430,7 @@ pub(super) fn serve_tag_search(
         Some(channel) => tag_channel_prefix(&label, channel),
         None => tag_prefix(&label),
     };
-    validate_cursor(after.as_deref(), &prefix)?;
+    validate_posting_cursor(after.as_deref(), &prefix, channel_id.is_some())?;
     let page = read.scan_page(
         prefix.as_bytes(),
         after.as_deref().map(str::as_bytes),

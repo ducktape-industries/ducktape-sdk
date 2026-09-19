@@ -190,13 +190,22 @@ fn tag_catalog_and_search_are_cursor_pages_and_encoded_scopes_do_not_bleed() {
     fold(&mut map, 1, &post("g", "m1", "#alpha"));
     fold(&mut map, 2, &post("g/a", "m2", "#alpha"));
     fold(&mut map, 3, &post("g", "m3", "#alpha"));
+    fold(&mut map, 4, &post("g", "m4", "#beta"));
 
     let (first, has_more, after) = tag_page(
         &map,
         serde_json::json!({"tags": {"channel_id": "g", "limit": 1}}),
     );
     assert_eq!(first[0].tag, "alpha");
-    assert!(!has_more, "one scoped label is one catalog page");
+    assert!(has_more);
+    let (second, has_more, after) = tag_page(
+        &map,
+        serde_json::json!({"tags": {
+            "channel_id": "g", "limit": 1, "after": after
+        }}),
+    );
+    assert_eq!(second[0].tag, "beta");
+    assert!(!has_more);
     assert!(after.is_none());
 
     let bytes = serve_view(
@@ -469,6 +478,19 @@ fn invalid_tag_queries_are_view_errors() {
             err.message.contains("not a valid tag"),
             "tag {bad:?} should be a view error, got {err:?}"
         );
+    }
+}
+
+#[test]
+fn tag_catalog_rejects_malformed_same_scope_rank_cursors() {
+    let map = Map::new();
+    for after in [
+        "tagrank/c/67/not-a-count/alpha",
+        "tagrank/c/67/fffffffffffffffe/Alpha",
+    ] {
+        let req = serde_json::json!({"tags": {"channel_id": "g", "after": after}});
+        let err = serve_view(&map, &serde_json::to_vec(&req).unwrap()).unwrap_err();
+        assert_eq!(err.code, super::FAIL_BAD_REQUEST);
     }
 }
 

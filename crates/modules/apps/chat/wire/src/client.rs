@@ -69,8 +69,8 @@ pub struct ChatReaction {
     pub emoji: String,
     pub count: i64,
     pub reacted_by_me: bool,
-    /// rendered reactor handles — the dedupe set delta folds need for exact
-    /// counts (mirrors the index row's reactor list; not rendered).
+    /// Reactor handles observed since this aggregate was hydrated. The list
+    /// deduplicates live/optimistic adds; it is not the full reactor set.
     pub reactors: Vec<String>,
 }
 
@@ -268,16 +268,6 @@ impl<'a> ChatReader<'a> {
     pub fn is_me(&self, handle: &str) -> bool {
         self.key
             .is_some_and(|key| self.names.owns_handle(handle, key))
-    }
-
-    /// This reader's own signing key, exactly — narrower than [`Self::is_me`]:
-    /// two devices of one account both answer `is_me` true for a handle
-    /// either of them owns, but only the row naming THIS key answers here.
-    /// Reaction ownership hangs on this: "reacted by me" means this key
-    /// pressed it, not that some other device sharing the account did.
-    fn is_this_key(&self, handle: &str) -> bool {
-        self.key
-            .is_some_and(|key| handle == index::party_handle(&Party::Key(key.to_vec())))
     }
 }
 
@@ -767,9 +757,9 @@ fn reaction_delta(
     reader: ChatReader<'_>,
 ) -> ChatDelta {
     let reactor = index::party_handle(actor);
-    // Reaction ownership is per-KEY, not per-account: `is_me` would light up
-    // "reacted by me" on every device of the account that pressed it.
-    let by_me = reader.is_this_key(&reactor);
+    // The module stamps the current account when one exists, while historic
+    // bare-key reactions remain owned only by that exact signing key.
+    let by_me = reader.is_me(&reactor);
     ChatDelta::Reaction {
         channel_id,
         seq: number_i64(seq),
@@ -882,9 +872,9 @@ pub fn tombstone_message(mut messages: Vec<ChatMessage>, seq: i64) -> Vec<ChatMe
     messages
 }
 
-/// Reactor-set semantics, mirroring the index fold: a reactor appears at most
-/// once per emoji, so replayed or double-submitted reactions cannot drift the
-/// count.
+/// Apply one reaction membership delta to a possibly hydrated aggregate.
+/// `reactors` only knows deltas observed since hydration, so it deduplicates
+/// optimistic/add replays without replacing the authoritative aggregate count.
 pub fn merge_message_reaction(
     mut messages: Vec<ChatMessage>,
     seq: i64,
@@ -908,15 +898,29 @@ pub fn merge_message_reaction(
         .find(|reaction| reaction.emoji == emoji)
     {
         Some(reaction) => {
-            reaction.reactors.retain(|current| current != reactor);
-            if added {
-                reaction.reactors.push(reactor.into());
-            }
-            reaction.count = count_i64(reaction.reactors.len());
-            reaction.reacted_by_me = match by_me {
-                true => added,
-                false => reaction.reacted_by_me,
+            let was_observed = reaction.reactors.iter().any(|current| current == reactor);
+            let changed = if by_me {
+                reaction.reacted_by_me != added
+            } else if added {
+                !was_observed
+            } else {
+                true
             };
+            if added && !was_observed {
+                reaction.reactors.push(reactor.into());
+            } else if !added {
+                reaction.reactors.retain(|current| current != reactor);
+            }
+            if changed {
+                reaction.count = if added {
+                    reaction.count.saturating_add(1)
+                } else {
+                    reaction.count.saturating_sub(1)
+                };
+            }
+            if by_me {
+                reaction.reacted_by_me = added;
+            }
         }
         None if added => row.reactions.push(ChatReaction {
             emoji: emoji.into(),
@@ -935,8 +939,9 @@ pub fn merge_message_reaction(
 
 /// The optimistic half of a reaction tap: the SAME reactor-set fold the live
 /// delta rides, applied locally before the op is submitted. `reactor` must be
-/// the canonical rendered handle (`user:{hex}`) — set semantics then make the
-/// real delta's replay a no-op instead of a double count.
+/// the canonical participant handle (`acct:{n}` or `user:{hex}`) — set
+/// semantics then make the real delta's replay a no-op instead of a double
+/// count.
 pub fn optimistic_reaction(
     messages: Vec<ChatMessage>,
     seq: i64,
@@ -2171,6 +2176,63 @@ mod tests {
             messages[0].render_rev, first_row,
             "an unflipped row never bumps"
         );
+    }
+
+    #[test]
+    fn hydrated_reaction_summary_keeps_its_aggregate_through_deltas() {
+        let mut message = committed(7, "alice");
+        message.reactions.push(ChatReaction {
+            emoji: "👍".into(),
+            count: 3,
+            reacted_by_me: false,
+            reactors: Vec::new(),
+        });
+
+        let added = merge_message_reaction(vec![message], 7, "👍", true, "user:other", false);
+        assert_eq!(added[0].reactions[0].count, 4);
+        let replayed = merge_message_reaction(added, 7, "👍", true, "user:other", false);
+        assert_eq!(replayed[0].reactions[0].count, 4);
+        let removed = merge_message_reaction(replayed, 7, "👍", false, "user:other", false);
+        assert_eq!(removed[0].reactions[0].count, 3);
+
+        let mut mine = committed(8, "alice");
+        mine.reactions.push(ChatReaction {
+            emoji: "👍".into(),
+            count: 3,
+            reacted_by_me: true,
+            reactors: Vec::new(),
+        });
+        let removed = merge_message_reaction(vec![mine], 8, "👍", false, "acct:7", true);
+        assert_eq!(removed[0].reactions[0].count, 2);
+        assert!(!removed[0].reactions[0].reacted_by_me);
+        let replayed = merge_message_reaction(removed, 8, "👍", false, "acct:7", true);
+        assert_eq!(replayed[0].reactions[0].count, 2);
+    }
+
+    #[test]
+    fn reaction_delta_matches_current_account_or_exact_key_only() {
+        let key = [0xaau8; 32];
+        let names = NameDirectory::new(BTreeMap::from([(
+            hex_encode(&key),
+            BoundAccount {
+                number: 7,
+                name: "me".into(),
+            },
+        )]));
+        let reader = ChatReader::new(Some(&key), &names);
+        let by_me = |actor: Party| {
+            let ChatDelta::Reaction { by_me, .. } =
+                reaction_delta("g".into(), 1, "👍".into(), true, &actor, reader)
+            else {
+                unreachable!()
+            };
+            by_me
+        };
+
+        assert!(by_me(Party::Account(7)));
+        assert!(by_me(Party::Key(key.to_vec())));
+        assert!(!by_me(Party::Key(vec![0xbb; 32])));
+        assert!(!by_me(Party::Account(8)));
     }
 
     /// Construction seeds `render_rev` from the rendered content, so a
