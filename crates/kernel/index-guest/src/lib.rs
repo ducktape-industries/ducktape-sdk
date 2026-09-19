@@ -79,6 +79,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod search;
 
+pub const FAIL_WRITE_REFUSED: i32 = 13;
+
 // ============================================================================
 // key conventions — shared verbatim by the host writer and every guest
 // ============================================================================
@@ -285,6 +287,21 @@ impl Fail {
     }
 }
 
+/// validate a derived put before the guest crosses into the host ABI.
+pub fn validate_store_value(value: &[u8]) -> Result<(), Fail> {
+    if value.len() > sdk::MAX_STORE_VALUE_BYTES {
+        return Err(Fail::new(
+            FAIL_WRITE_REFUSED,
+            format!(
+                "derived value exceeds store cap ({} > {})",
+                value.len(),
+                sdk::MAX_STORE_VALUE_BYTES
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// `?` on string errors: exit code 1.
 impl From<String> for Fail {
     fn from(message: String) -> Self {
@@ -364,6 +381,17 @@ pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
         succ.pop();
     }
     None
+}
+
+#[cfg(test)]
+mod store_value_tests {
+    use super::validate_store_value;
+
+    #[test]
+    fn derived_value_cap_is_exact() {
+        assert!(validate_store_value(&vec![0; sdk::MAX_STORE_VALUE_BYTES]).is_ok());
+        assert!(validate_store_value(&vec![0; sdk::MAX_STORE_VALUE_BYTES + 1]).is_err());
+    }
 }
 
 /// build a [`Page`] from an ordered key/value stream already bounded to the

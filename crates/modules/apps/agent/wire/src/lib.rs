@@ -355,6 +355,15 @@ pub struct InvocationEntry {
     pub invocation: InvocationView,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InvocationPage {
+    pub entries: Vec<InvocationEntry>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<u64>,
+}
+
 // ---- ops ------------------------------------------------------------------------------
 
 /// the ops an account submits: a key-held account by signed frame, a program
@@ -436,7 +445,7 @@ pub enum AgentReply {
     Provision(Option<ProvisionReceipt>),
     Binding(Option<BindingView>),
     Invocation(Option<InvocationView>),
-    Invocations(Vec<InvocationEntry>),
+    Invocations(InvocationPage),
 }
 
 /// the stamp an op declares through `set_assigned`: the value this module
@@ -663,6 +672,16 @@ mod tests {
                 .unwrap(),
             )]),
         };
+        let invocation_page = InvocationPage {
+            entries: (1..=257)
+                .map(|at| InvocationEntry {
+                    at,
+                    invocation: view.clone(),
+                })
+                .collect(),
+            has_more: true,
+            next_after: Some(257),
+        };
         for r in [
             AgentReply::Binding(Some(BindingView {
                 account: 2,
@@ -670,16 +689,7 @@ mod tests {
                 revision: 3,
             })),
             AgentReply::Invocation(Some(view.clone())),
-            AgentReply::Invocations(vec![InvocationEntry {
-                at: 1,
-                invocation: InvocationView {
-                    status: Status::Failed {
-                        step: 2,
-                        failure: Failure::Program(ProgramFault::FrameTooLarge { bytes: 9 }),
-                    },
-                    ..view
-                },
-            }]),
+            AgentReply::Invocations(invocation_page),
         ] {
             assert_eq!(decode_reply(&encode_reply(&r)).unwrap(), r);
         }

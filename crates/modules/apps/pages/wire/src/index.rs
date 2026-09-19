@@ -42,6 +42,7 @@
 use index_guest::search::{self, DEFAULT_POSTING_CAP};
 use index_guest::{Fail, OpRow, StateRead, Writes};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::error::PageError;
 use crate::text_ranges::{edit_between, rebase_marks, set_span_mark, utf16_len, validate_marks};
@@ -152,8 +153,7 @@ pub struct PageRow {
     pub parent: Option<String>,
 }
 
-/// one comment thread with its ordered comments, tombstones included (the
-/// view filters live ones, mirroring the canonical `ThreadView`).
+/// one comment thread's metadata. comments live in one row each under `cmt/`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadRow {
     pub id: String,
@@ -167,7 +167,8 @@ pub struct ThreadRow {
     pub resolved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_by: Option<String>,
-    pub comments: Vec<CommentRow>,
+    pub comment_count: u64,
+    pub live_comment_count: u64,
 }
 
 /// one comment of a thread; `deleted` tombstones content but keeps order.
@@ -182,11 +183,42 @@ pub struct CommentRow {
     pub deleted: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPage {
+    pub thread: ThreadRow,
+    pub comments: Vec<CommentRow>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub thread: ThreadRow,
+    pub comment: CommentRow,
+}
+
 /// the threads anchored to one target, as `threads_for_targets` groups them.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetThreadsRow {
     pub target: String,
-    pub threads: Vec<ThreadRow>,
+    pub threads: Vec<ThreadPage>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetThreadQuery {
+    pub target: String,
+    #[serde(default)]
+    pub after: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PageHits {
+    pub hits: Vec<PageBlockRow>,
+    pub capped: bool,
 }
 
 /// pages' view requests, externally tagged:
@@ -216,14 +248,26 @@ pub enum PagesViewQuery {
     /// every thread anchored to any of `targets`, grouped by target — the
     /// one call a page render makes with all visible block ids + the page
     /// id. `targets` beyond [`MAX_QUERY_TARGETS`] are rejected.
-    ThreadsForTargets { targets: Vec<String> },
+    ThreadsForTargets {
+        targets: Vec<TargetThreadQuery>,
+        #[serde(default)]
+        thread_limit: u16,
+        #[serde(default)]
+        comment_limit: u16,
+    },
     /// one block by id: the page it belongs to and its text, for a link that
     /// names a block and has to say which page opens and what to call it.
     GetBlock { block_id: String },
-    /// one comment thread by id, with the block it is anchored to.
-    GetThread { thread_id: String },
-    /// the thread one comment belongs to, comments included — a link that
-    /// names a comment needs its text and the block its thread anchors to.
+    /// one bounded comment page of a thread by id, with the block it is
+    /// anchored to.
+    GetThread {
+        thread_id: String,
+        #[serde(default)]
+        after: Option<String>,
+        limit: u16,
+    },
+    /// thread metadata plus the named comment only — a link that names a
+    /// comment never loads its siblings.
     ThreadOfComment { comment_id: String },
     Search {
         text: String,
@@ -254,9 +298,10 @@ pub enum PagesViewReply {
     /// one block, `None` for an id this index does not hold.
     Block(Option<PageBlockRow>),
     /// one thread, `None` for an id this index does not hold.
-    Thread(Option<ThreadRow>),
+    Thread(Option<ThreadPage>),
+    ThreadOfComment(Option<ThreadComment>),
     /// search hits, newest first.
-    Hits(Vec<PageBlockRow>),
+    Hits(PageHits),
 }
 
 fn blk_key(id: &str) -> String {
@@ -285,6 +330,14 @@ fn cmt_key(comment_id: &str) -> String {
     format!("cmt/{comment_id}")
 }
 
+fn ctm_prefix(thread_id: &str) -> String {
+    format!("ctm/{}/", hex_lower(thread_id.as_bytes()))
+}
+
+fn ctm_key(thread_id: &str, comment_id: &str) -> String {
+    format!("{}{comment_id}", ctm_prefix(thread_id))
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -304,6 +357,10 @@ fn render_author(party: &crate::Party) -> String {
 
 fn tok_key(token: &str, id: &str) -> String {
     format!("tok/{token}/{id}")
+}
+
+fn tok_scope_key(page_id: &str, token: &str, id: &str) -> String {
+    format!("toks/{}/{token}/{id}", hex_lower(page_id.as_bytes()))
 }
 
 fn read_row(read: &impl StateRead, id: &str) -> Result<Option<PageBlockRow>, Fail> {
@@ -386,6 +443,11 @@ fn put_row_and_toks(out: &mut Writes, row: &PageBlockRow) -> Result<(), Fail> {
     .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?;
     for token in search::tokens(&row.text) {
         index_guest::put(out, tok_key(&token, &row.block_id), tok_ref.clone());
+        index_guest::put(
+            out,
+            tok_scope_key(&row.page_id, &token, &row.block_id),
+            tok_ref.clone(),
+        );
     }
     Ok(())
 }
@@ -393,6 +455,7 @@ fn put_row_and_toks(out: &mut Writes, row: &PageBlockRow) -> Result<(), Fail> {
 fn delete_toks(out: &mut Writes, row: &PageBlockRow) {
     for token in search::tokens(&row.text) {
         index_guest::delete(out, tok_key(&token, &row.block_id));
+        index_guest::delete(out, tok_scope_key(&row.page_id, &token, &row.block_id));
     }
 }
 
@@ -431,11 +494,7 @@ fn purge_target_threads(read: &impl StateRead, out: &mut Writes, target: &str) -
             let Some(thread_id) = marker.strip_prefix(&prefix) else {
                 continue;
             };
-            if let Some(thread) = read_thread(read, thread_id)? {
-                for comment in &thread.comments {
-                    index_guest::delete(out, cmt_key(&comment.id));
-                }
-            }
+            delete_thread_comments(read, out, thread_id);
             index_guest::delete(out, cthread_key(thread_id));
             index_guest::delete(out, marker.to_string());
         }
@@ -476,25 +535,75 @@ fn put_thread(out: &mut Writes, row: &ThreadRow) -> Result<(), Fail> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CommentRecord {
+    thread_id: String,
+    comment: CommentRow,
+}
+
+fn put_comment(out: &mut Writes, thread_id: &str, comment: &CommentRow) -> Result<(), Fail> {
+    let bytes = serde_json::to_vec(&CommentRecord {
+        thread_id: thread_id.into(),
+        comment: comment.clone(),
+    })
+    .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?;
+    index_guest::put(out, cmt_key(&comment.id), bytes);
+    index_guest::put(out, ctm_key(thread_id, &comment.id), Vec::new());
+    Ok(())
+}
+
+fn read_comment(read: &impl StateRead, comment_id: &str) -> Result<Option<CommentRecord>, Fail> {
+    let Some(bytes) = read.get(cmt_key(comment_id).as_bytes()) else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
+}
+
 /// resolve a comment id to its owning thread row via the `cmt/` pointer. an
 /// absent pointer means the comment predates this index — a deterministic
 /// skip, like every pre-index record.
-fn thread_of_comment(read: &impl StateRead, comment_id: &str) -> Result<Option<ThreadRow>, Fail> {
-    let Some(pointer) = read.get(cmt_key(comment_id).as_bytes()) else {
+fn thread_of_comment(
+    read: &impl StateRead,
+    comment_id: &str,
+) -> Result<Option<ThreadComment>, Fail> {
+    let Some(record) = read_comment(read, comment_id)? else {
         return Ok(None);
     };
-    let thread_id = String::from_utf8(pointer)
-        .map_err(|_| Fail::new(FAIL_ROW_DECODE, "comment pointer is not utf-8"))?;
-    read_thread(read, &thread_id)
+    let Some(thread) = read_thread(read, &record.thread_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(ThreadComment {
+        thread,
+        comment: record.comment,
+    }))
 }
 
 /// drop a whole thread — row, target marker, and comment pointers.
 fn delete_thread(out: &mut Writes, thread: &ThreadRow) {
-    for comment in &thread.comments {
-        index_guest::delete(out, cmt_key(&comment.id));
-    }
     index_guest::delete(out, ctgt_key(&thread.target, &thread.id));
     index_guest::delete(out, cthread_key(&thread.id));
+}
+
+fn delete_thread_comments(read: &impl StateRead, out: &mut Writes, thread_id: &str) {
+    let prefix = ctm_prefix(thread_id);
+    let mut after = None;
+    loop {
+        let page = read.scan_page(prefix.as_bytes(), after.as_deref(), MAX_PAGE_LIMIT);
+        for (key, _) in &page.entries {
+            let marker = String::from_utf8_lossy(key);
+            let Some(comment_id) = marker.strip_prefix(&prefix) else {
+                continue;
+            };
+            index_guest::delete(out, cmt_key(comment_id));
+            index_guest::delete(out, marker.into_owned());
+        }
+        if !page.has_more {
+            break;
+        }
+        after = page.next_after.map(String::into_bytes);
+    }
 }
 
 /// re-home one block, mirroring `block_ops`' `MoveBlock` arm case for case.
@@ -852,7 +961,8 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
             };
             let thread = match read_thread(read, &thread_id)? {
                 Some(mut thread) => {
-                    thread.comments.push(comment);
+                    thread.comment_count += 1;
+                    thread.live_comment_count += 1;
                     thread
                 }
                 None => {
@@ -867,11 +977,12 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
                         anchor,
                         resolved: false,
                         resolved_by: None,
-                        comments: vec![comment],
+                        comment_count: 1,
+                        live_comment_count: 1,
                     }
                 }
             };
-            index_guest::put(&mut out, cmt_key(&comment_id), thread_id.into_bytes());
+            put_comment(&mut out, &thread_id, &comment)?;
             put_thread(&mut out, &thread)?;
         }
         PageMsg::MoveCommentThread {
@@ -891,31 +1002,39 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
         PageMsg::EditComment {
             comment_id, text, ..
         } => {
-            let Some(mut thread) = thread_of_comment(read, &comment_id)? else {
+            let Some(record) = read_comment(read, &comment_id)? else {
                 return Ok(out);
             };
-            let Some(comment) = thread.comments.iter_mut().find(|c| c.id == comment_id) else {
+            let Some(thread) = read_thread(read, &record.thread_id)? else {
                 return Ok(out);
             };
+            let mut comment = record.comment;
             comment.text = text;
             comment.edited_at = Some(op.time);
+            put_comment(&mut out, &thread.id, &comment)?;
             put_thread(&mut out, &thread)?;
         }
         PageMsg::DeleteComment { comment_id } => {
-            let Some(mut thread) = thread_of_comment(read, &comment_id)? else {
+            let Some(record) = read_comment(read, &comment_id)? else {
                 return Ok(out);
             };
-            let Some(comment) = thread.comments.iter_mut().find(|c| c.id == comment_id) else {
+            let Some(mut thread) = read_thread(read, &record.thread_id)? else {
                 return Ok(out);
             };
+            if record.comment.deleted {
+                return Ok(out);
+            }
+            let mut comment = record.comment;
             comment.deleted = true;
             comment.text = String::new();
             // the module removes the whole thread record when its last live
             // comment tombstones — mirror that.
-            let all_deleted = thread.comments.iter().all(|c| c.deleted);
-            if all_deleted {
+            if thread.live_comment_count <= 1 {
+                delete_thread_comments(read, &mut out, &thread.id);
                 delete_thread(&mut out, &thread);
             } else {
+                thread.live_comment_count -= 1;
+                put_comment(&mut out, &thread.id, &comment)?;
                 put_thread(&mut out, &thread)?;
             }
         }
@@ -936,6 +1055,94 @@ fn fold_document_op(op: &OpRow, msg: PageMsg, read: &impl StateRead) -> Result<W
 
 fn reply_json(reply: &PagesViewReply) -> Result<Vec<u8>, Fail> {
     serde_json::to_vec(reply).map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
+}
+
+fn comment_page_limit(limit: u16) -> usize {
+    usize::from(if limit == 0 {
+        MAX_PAGE_QUERY_LIMIT
+    } else {
+        limit.min(MAX_PAGE_QUERY_LIMIT)
+    })
+}
+
+fn thread_page(
+    read: &impl StateRead,
+    thread: ThreadRow,
+    after: Option<String>,
+    limit: u16,
+) -> Result<ThreadPage, Fail> {
+    let prefix = ctm_prefix(&thread.id);
+    let after_key = after.as_deref().map(|id| ctm_key(&thread.id, id));
+    let page = read.scan_page(
+        prefix.as_bytes(),
+        after_key.as_deref().map(str::as_bytes),
+        comment_page_limit(limit),
+    );
+    let mut comments = Vec::new();
+    for (key, _) in &page.entries {
+        let marker = String::from_utf8_lossy(key);
+        let Some(comment_id) = marker.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(record) = read_comment(read, comment_id)? else {
+            continue;
+        };
+        if record.thread_id != thread.id {
+            return Err(Fail::new(
+                FAIL_ROW_DECODE,
+                "comment marker points outside thread",
+            ));
+        }
+        if !record.comment.deleted {
+            comments.push(record.comment);
+        }
+    }
+    let next_after = page
+        .next_after
+        .and_then(|key| key.strip_prefix(&prefix).map(str::to_owned));
+    Ok(ThreadPage {
+        thread,
+        comments,
+        has_more: page.has_more,
+        next_after,
+    })
+}
+
+fn target_threads_page(
+    read: &impl StateRead,
+    request: TargetThreadQuery,
+    thread_limit: u16,
+    comment_limit: u16,
+) -> Result<TargetThreadsRow, Fail> {
+    let prefix = ctgt_prefix(&request.target);
+    let after_key = request
+        .after
+        .as_deref()
+        .map(|id| ctgt_key(&request.target, id));
+    let page = read.scan_page(
+        prefix.as_bytes(),
+        after_key.as_deref().map(str::as_bytes),
+        comment_page_limit(thread_limit),
+    );
+    let mut threads = Vec::new();
+    for (key, _) in &page.entries {
+        let marker = String::from_utf8_lossy(key);
+        let Some(thread_id) = marker.strip_prefix(&prefix) else {
+            continue;
+        };
+        if let Some(thread) = read_thread(read, thread_id)? {
+            threads.push(thread_page(read, thread, None, comment_limit)?);
+        }
+    }
+    let next_after = page
+        .next_after
+        .and_then(|key| key.strip_prefix(&prefix).map(str::to_owned));
+    Ok(TargetThreadsRow {
+        target: request.target,
+        threads,
+        has_more: page.has_more,
+        next_after,
+    })
 }
 
 // ── the page read, mirrored off the derived rows ─────────────────────────
@@ -980,12 +1187,20 @@ fn query_row(
     read: &impl StateRead,
     block_id: &str,
     reads: &mut usize,
+    cache: &mut BTreeMap<String, PageBlockRow>,
 ) -> Result<Option<PageBlockRow>, Fail> {
+    if let Some(row) = cache.get(block_id) {
+        return Ok(Some(row.clone()));
+    }
     if *reads >= MAX_TRAVERSAL_WORK {
         return Err(page_read_fail(PageError::PageTraversalTooDeep));
     }
     *reads += 1;
-    read_row(read, block_id)
+    let Some(row) = read_row(read, block_id)? else {
+        return Ok(None);
+    };
+    cache.insert(block_id.into(), row.clone());
+    Ok(Some(row))
 }
 
 /// one bounded slice of `page_id`'s preorder traversal, or `None` when this
@@ -997,7 +1212,8 @@ fn get_page(
     limit: u16,
 ) -> Result<Option<PageBlockPage>, Fail> {
     let mut reads = 0_usize;
-    let root = match query_row(read, page_id, &mut reads)? {
+    let mut cache = BTreeMap::new();
+    let root = match query_row(read, page_id, &mut reads, &mut cache)? {
         Some(row) if row.kind == BlockKind::Page => row,
         _ => return Ok(None),
     };
@@ -1007,9 +1223,10 @@ fn get_page(
             if cursor.starts_with('\0') {
                 return Err(invalid_page_cursor());
             }
-            let row = query_row(read, &cursor, &mut reads)?.ok_or_else(invalid_page_cursor)?;
-            validate_page_cursor(read, &root_id, &row, &mut reads)?;
-            following_page_block(read, &root_id, &row, &mut reads)?
+            let row = query_row(read, &cursor, &mut reads, &mut cache)?
+                .ok_or_else(invalid_page_cursor)?;
+            validate_page_cursor(read, &root_id, &row, &mut reads, &mut cache)?;
+            following_page_block(read, &root_id, &row, &mut reads, &mut cache)?
         }
         None => Some(root),
     };
@@ -1030,7 +1247,7 @@ fn get_page(
             break;
         }
         spent += cost;
-        current = following_page_block(read, &root_id, &row, &mut reads)?;
+        current = following_page_block(read, &root_id, &row, &mut reads, &mut cache)?;
         blocks.push(block);
     }
     let next_after = current
@@ -1046,6 +1263,7 @@ fn validate_page_cursor(
     root_id: &str,
     cursor: &PageBlockRow,
     reads: &mut usize,
+    cache: &mut BTreeMap<String, PageBlockRow>,
 ) -> Result<(), Fail> {
     if cursor.block_id == root_id {
         return Ok(());
@@ -1055,7 +1273,7 @@ fn validate_page_cursor(
         None if cursor.kind == BlockKind::Page => return Err(invalid_page_cursor()),
         None => return Err(corrupt()),
     };
-    let parent = query_row(read, parent_id, reads)?.ok_or_else(corrupt)?;
+    let parent = query_row(read, parent_id, reads, cache)?.ok_or_else(corrupt)?;
     if !parent.children.iter().any(|id| id == &cursor.block_id) {
         return Err(corrupt());
     }
@@ -1079,6 +1297,7 @@ fn following_page_block(
     root_id: &str,
     current: &PageBlockRow,
     reads: &mut usize,
+    cache: &mut BTreeMap<String, PageBlockRow>,
 ) -> Result<Option<PageBlockRow>, Fail> {
     let may_descend = current.kind != BlockKind::Page || current.block_id == root_id;
     let child_id = if may_descend {
@@ -1087,7 +1306,7 @@ fn following_page_block(
         None
     };
     if let Some(child_id) = child_id {
-        return query_row(read, child_id, reads)?
+        return query_row(read, child_id, reads, cache)?
             .ok_or_else(corrupt)
             .map(Some);
     }
@@ -1105,14 +1324,14 @@ fn following_page_block(
                 Err(corrupt())
             };
         };
-        let parent = query_row(read, &id, reads)?.ok_or_else(corrupt)?;
+        let parent = query_row(read, &id, reads, cache)?.ok_or_else(corrupt)?;
         let child_index = parent
             .children
             .iter()
             .position(|id| id == &child_id)
             .ok_or_else(corrupt)?;
         if let Some(sibling_id) = parent.children.get(child_index + 1) {
-            return query_row(read, sibling_id, reads)?
+            return query_row(read, sibling_id, reads, cache)?
                 .ok_or_else(corrupt)
                 .map(Some);
         }
@@ -1153,44 +1372,36 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                 next_after: page.next_after,
             })
         }
-        PagesViewQuery::ThreadsForTargets { targets } => {
+        PagesViewQuery::ThreadsForTargets {
+            targets,
+            thread_limit,
+            comment_limit,
+        } => {
             if targets.len() > MAX_QUERY_TARGETS {
                 return Err(Fail::new(FAIL_BAD_REQUEST, "too many targets"));
             }
-            let mut groups = Vec::with_capacity(targets.len());
-            for target in targets {
-                let prefix = ctgt_prefix(&target);
-                let mut threads = Vec::new();
-                let mut after: Option<Vec<u8>> = None;
-                loop {
-                    let page = read.scan_page(prefix.as_bytes(), after.as_deref(), MAX_PAGE_LIMIT);
-                    for (key, _) in &page.entries {
-                        let marker = String::from_utf8_lossy(key);
-                        let Some(thread_id) = marker.strip_prefix(&prefix) else {
-                            continue;
-                        };
-                        if let Some(thread) = read_thread(read, thread_id)? {
-                            threads.push(thread);
-                        }
-                    }
-                    if !page.has_more {
-                        break;
-                    }
-                    after = page.next_after.map(String::into_bytes);
-                }
-                groups.push(TargetThreadsRow { target, threads });
-            }
+            let groups = targets
+                .into_iter()
+                .map(|target| target_threads_page(read, target, thread_limit, comment_limit))
+                .collect::<Result<Vec<_>, _>>()?;
             reply_json(&PagesViewReply::Threads(groups))
         }
         PagesViewQuery::GetBlock { block_id } => {
             reply_json(&PagesViewReply::Block(read_row(read, &block_id)?))
         }
-        PagesViewQuery::GetThread { thread_id } => {
-            reply_json(&PagesViewReply::Thread(read_thread(read, &thread_id)?))
+        PagesViewQuery::GetThread {
+            thread_id,
+            after,
+            limit,
+        } => {
+            let page = read_thread(read, &thread_id)?
+                .map(|thread| thread_page(read, thread, after, limit))
+                .transpose()?;
+            reply_json(&PagesViewReply::Thread(page))
         }
-        PagesViewQuery::ThreadOfComment { comment_id } => reply_json(&PagesViewReply::Thread(
-            thread_of_comment(read, &comment_id)?,
-        )),
+        PagesViewQuery::ThreadOfComment { comment_id } => reply_json(
+            &PagesViewReply::ThreadOfComment(thread_of_comment(read, &comment_id)?),
+        ),
         PagesViewQuery::Search {
             text,
             page_id,
@@ -1200,18 +1411,14 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
             if tokens.is_empty() {
                 return Err(Fail::new(FAIL_BAD_REQUEST, "search text has no tokens"));
             }
-            // each token matches as a prefix (search-as-you-type), and block
-            // ids are global, so postings carry no page segment to scan by:
-            // the page restriction goes into the intersection as a predicate,
-            // where it is applied before the cap. newest first, block id
-            // tiebreak for a stable order.
+            let key_ns = page_id
+                .as_deref()
+                .map(|page| format!("toks/{}/", hex_lower(page.as_bytes())))
+                .unwrap_or_else(|| "tok/".into());
             let found =
-                search::intersect_prefix(read, "tok/", &tokens, DEFAULT_POSTING_CAP, |value| {
+                search::intersect_prefix(read, &key_ns, &tokens, DEFAULT_POSTING_CAP, |value| {
                     let r: TokRef = serde_json::from_slice(value).ok()?;
-                    page_id
-                        .as_ref()
-                        .is_none_or(|p| &r.page_id == p)
-                        .then_some((r.time, r.block_id))
+                    Some((r.time, r.block_id))
                 });
             let refs: Vec<TokRef> = found
                 .hits
@@ -1221,6 +1428,7 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
             let limit = limit
                 .unwrap_or(DEFAULT_SEARCH_LIMIT)
                 .clamp(1, MAX_SEARCH_LIMIT);
+            let capped = found.capped || refs.len() > limit;
             let mut hits = Vec::new();
             for r in refs.into_iter().take(limit) {
                 if let Some(bytes) = read.get(blk_key(&r.block_id).as_bytes()) {
@@ -1230,7 +1438,7 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                     );
                 }
             }
-            reply_json(&PagesViewReply::Hits(hits))
+            reply_json(&PagesViewReply::Hits(PageHits { capped, hits }))
         }
     }
 }
@@ -1316,7 +1524,7 @@ mod tests {
 
     fn search(map: &Map, req: serde_json::Value) -> Vec<PageBlockRow> {
         match view(map, req) {
-            PagesViewReply::Hits(hits) => hits,
+            PagesViewReply::Hits(PageHits { hits, .. }) => hits,
             other => panic!("expected hits, got {other:?}"),
         }
     }
@@ -1329,9 +1537,17 @@ mod tests {
     }
 
     fn threads(map: &Map, targets: &[&str]) -> Vec<TargetThreadsRow> {
+        let targets: Vec<TargetThreadQuery> = targets
+            .iter()
+            .map(|target| TargetThreadQuery {
+                target: (*target).into(),
+                after: None,
+            })
+            .collect();
         match view(
             map,
-            serde_json::json!({"threads_for_targets": {"targets": targets}}),
+            serde_json::json!({"threads_for_targets": {"targets": targets,
+                "thread_limit": 0, "comment_limit": 0}}),
         ) {
             PagesViewReply::Threads(groups) => groups,
             other => panic!("expected threads, got {other:?}"),
@@ -1750,7 +1966,7 @@ mod tests {
         // one group per REQUESTED target, in request order; absent = empty.
         let groups = threads(&map, &["b2", "b1", "ghost"]);
         let names = |group: &TargetThreadsRow| -> Vec<String> {
-            group.threads.iter().map(|t| t.id.clone()).collect()
+            group.threads.iter().map(|t| t.thread.id.clone()).collect()
         };
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].target, "b2");
@@ -1758,13 +1974,12 @@ mod tests {
         assert_eq!(names(&groups[1]), ["t1", "t2"]);
         assert!(groups[2].threads.is_empty());
         let t1 = &groups[1].threads[0];
-        assert_eq!(t1.opener, "user:jess");
+        assert_eq!(t1.thread.opener, "user:jess");
         let texts: Vec<&str> = t1.comments.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, ["first", "second"]);
 
-        // a tombstone STAYS in the row and the view returns it VERBATIM
-        // (rendering a tombstone is the consumer's call, not a view filter);
-        // edits and resolution fold in place.
+        // a tombstone stays indexed for cursor progress but is omitted from
+        // the live comment page; edits and resolution fold in place.
         apply(
             &mut map,
             2,
@@ -1785,15 +2000,11 @@ mod tests {
         );
         let groups = threads(&map, &["b1"]);
         let t1 = &groups[0].threads[0];
-        assert!(t1.resolved);
-        assert_eq!(t1.resolved_by.as_deref(), Some("user:jess"));
-        assert!(
-            t1.comments[0].deleted,
-            "the tombstone is served, not hidden"
-        );
-        assert_eq!(t1.comments[0].text, "", "tombstoned content is emptied");
-        assert_eq!(t1.comments[1].text, "reworded");
-        assert_eq!(t1.comments[1].edited_at, Some(1_002));
+        assert!(t1.thread.resolved);
+        assert_eq!(t1.thread.resolved_by.as_deref(), Some("user:jess"));
+        assert_eq!(t1.comments[0].id, "m2");
+        assert_eq!(t1.comments[0].text, "reworded");
+        assert_eq!(t1.comments[0].edited_at, Some(1_002));
 
         // deleting a thread's LAST live comment removes the whole thread …
         apply(
@@ -1818,6 +2029,102 @@ mod tests {
         let groups = threads(&map, &["b1", "b2"]);
         assert_eq!(names(&groups[0]), ["t1", "t3"]);
         assert!(groups[1].threads.is_empty());
+    }
+
+    #[test]
+    fn comment_pages_skip_tombstones_without_stalling_and_thread_links_are_small() {
+        let mut map = Map::new();
+        let mut ops = vec![create("p1", "home", None), insert("p1", "b1", "body")];
+        for i in 0..257 {
+            ops.push(add(
+                "t1",
+                &format!("c{i:03}"),
+                "b1",
+                &format!("comment {i}"),
+            ));
+        }
+        apply(&mut map, 1, &ops);
+        apply(
+            &mut map,
+            2,
+            &[PageMsg::DeleteComment {
+                comment_id: "c255".into(),
+            }],
+        );
+
+        let first = view(
+            &map,
+            serde_json::json!({"get_thread": {"thread_id": "t1", "limit": 256}}),
+        );
+        let PagesViewReply::Thread(Some(first)) = first else {
+            panic!("expected first thread page")
+        };
+        assert_eq!(first.comments.len(), 255);
+        assert!(first.has_more);
+        assert_eq!(first.next_after.as_deref(), Some("c255"));
+
+        let second = view(
+            &map,
+            serde_json::json!({"get_thread": {
+                "thread_id": "t1", "after": "c255", "limit": 256
+            }}),
+        );
+        let PagesViewReply::Thread(Some(second)) = second else {
+            panic!("expected second thread page")
+        };
+        assert_eq!(
+            second
+                .comments
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c256"]
+        );
+        assert!(!second.has_more);
+
+        let linked = view(
+            &map,
+            serde_json::json!({"thread_of_comment": {"comment_id": "c256"}}),
+        );
+        let PagesViewReply::ThreadOfComment(Some(linked)) = linked else {
+            panic!("expected small comment link")
+        };
+        assert_eq!(linked.thread.id, "t1");
+        assert_eq!(linked.comment.id, "c256");
+    }
+
+    #[test]
+    fn target_thread_pages_have_forward_cursors() {
+        let mut map = Map::new();
+        let mut ops = vec![create("p1", "home", None), insert("p1", "b1", "body")];
+        for i in 0..3 {
+            ops.push(add(&format!("t{i}"), &format!("c{i}"), "b1", "comment"));
+        }
+        apply(&mut map, 1, &ops);
+        let first = view(
+            &map,
+            serde_json::json!({"threads_for_targets": {
+                "targets": [{"target": "b1"}], "thread_limit": 1, "comment_limit": 1
+            }}),
+        );
+        let PagesViewReply::Threads(groups) = first else {
+            panic!("expected target page")
+        };
+        assert_eq!(groups[0].threads.len(), 1);
+        assert!(groups[0].has_more);
+        let after = groups[0].next_after.clone().expect("target cursor");
+        let second = view(
+            &map,
+            serde_json::json!({"threads_for_targets": {
+                "targets": [{"target": "b1", "after": after}],
+                "thread_limit": 1, "comment_limit": 1
+            }}),
+        );
+        let PagesViewReply::Threads(groups) = second else {
+            panic!("expected target continuation")
+        };
+        assert_eq!(groups[0].threads.len(), 1);
+        assert_ne!(groups[0].threads[0].thread.id, "t0");
     }
 
     /// A LINK THAT NAMES A BLOCK OR A THREAD resolves on this lane: the
@@ -1852,6 +2159,8 @@ mod tests {
 
         let thread = serde_json::to_vec(&PagesViewQuery::GetThread {
             thread_id: "t1".into(),
+            after: None,
+            limit: 0,
         })
         .unwrap();
         let reply: PagesViewReply =
@@ -1859,7 +2168,7 @@ mod tests {
         let PagesViewReply::Thread(Some(row)) = reply else {
             panic!("expected the thread, got {reply:?}");
         };
-        assert_eq!(row.target, "b1");
+        assert_eq!(row.thread.target, "b1");
 
         let of_comment = serde_json::to_vec(&PagesViewQuery::ThreadOfComment {
             comment_id: "c1".into(),
@@ -1867,11 +2176,11 @@ mod tests {
         .unwrap();
         let reply: PagesViewReply =
             serde_json::from_slice(&serve_view(&map, &of_comment).expect("answers")).unwrap();
-        let PagesViewReply::Thread(Some(row)) = reply else {
+        let PagesViewReply::ThreadOfComment(Some(row)) = reply else {
             panic!("expected the comment's thread, got {reply:?}");
         };
-        assert_eq!(row.id, "t1");
-        assert_eq!(row.comments[0].text, "not yet");
+        assert_eq!(row.thread.id, "t1");
+        assert_eq!(row.comment.text, "not yet");
 
         let unknown = serde_json::to_vec(&PagesViewQuery::GetBlock {
             block_id: "nope".into(),
@@ -1885,7 +2194,12 @@ mod tests {
     #[test]
     fn threads_for_targets_rejects_over_cap_target_lists() {
         let map = Map::new();
-        let targets: Vec<String> = (0..=MAX_QUERY_TARGETS).map(|i| format!("t{i}")).collect();
+        let targets: Vec<TargetThreadQuery> = (0..=MAX_QUERY_TARGETS)
+            .map(|i| TargetThreadQuery {
+                target: format!("t{i}"),
+                after: None,
+            })
+            .collect();
         let req =
             serde_json::to_vec(&serde_json::json!({"threads_for_targets": {"targets": targets}}))
                 .unwrap();
@@ -1897,7 +2211,7 @@ mod tests {
 
     /// seed one block row and its `shared` posting straight into the map: the
     /// fold path is covered above, and this test needs more postings on ONE
-    /// token than [`DEFAULT_POSTING_CAP`] — cheaper to write than to fold.
+    /// token than [`MAX_POSTING_SCAN`] — cheaper to write than to fold.
     fn posting(map: &mut Map, page_id: &str, block_id: &str, time: u64) {
         let row = PageBlockRow {
             author: crate::Party::Key(b"jess".to_vec()),
@@ -1925,6 +2239,10 @@ mod tests {
             tok_key("shared", block_id).into_bytes(),
             serde_json::to_vec(&tok).unwrap(),
         );
+        map.insert(
+            tok_scope_key(page_id, "shared", block_id).into_bytes(),
+            serde_json::to_vec(&tok).unwrap(),
+        );
     }
 
     #[test]
@@ -1933,7 +2251,7 @@ mod tests {
         // one crowded page whose postings sort FIRST in key order and carry the
         // newest times: capping before the page filter would spend the whole
         // budget on them and answer "nothing on p".
-        for i in 0..=DEFAULT_POSTING_CAP {
+        for i in 0..=index_guest::search::MAX_POSTING_SCAN {
             posting(&mut map, "other", &format!("o{i:05}"), 9_000 + i as u64);
         }
         for (i, id) in ["p001", "p002", "p003"].iter().enumerate() {

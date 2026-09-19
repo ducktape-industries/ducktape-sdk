@@ -548,6 +548,9 @@ pub struct Comment {
 pub struct ThreadView {
     pub thread: Thread,
     pub comments: Vec<Comment>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
 }
 
 /// The authenticated actor resolved by the module for this applied operation.
@@ -632,6 +635,9 @@ pub enum PageQuery {
     /// one thread with its live comments.
     CommentThread {
         thread_id: String,
+        #[serde(default)]
+        after: Option<String>,
+        limit: u64,
     },
     /// one comment by id, tombstones included — the existence probe a module
     /// emitting `AddComment` follow-ups uses (comment ids are client-minted,

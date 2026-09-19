@@ -8,11 +8,8 @@
 //!   so key order within a channel is NEWEST FIRST: a channel-scoped tag page
 //!   streams straight off one scan, and a label's newest live seq is the
 //!   first posting under its prefix.
-//! - `tagcat/{channel}/{label}`      — [`TagCat`]: the count of LIVE messages
-//!   carrying the tag in that channel. count only: the fold's reads are
-//!   get-only, so a stored `last_seq` could not be re-derived when the newest
-//!   tagged message is deleted — instead `last_seq` is read at query time from
-//!   the newest posting, which the reversed key makes an O(1) probe.
+//! - `tagcat/{encoded-channel}/{label}` / `tagcat/g/{label}` — [`TagCat`]
+//!   count and last sequence, mirrored by the count-ranked `tagrank/` marker.
 //!
 //! extraction grammar (see the design doc): `#` + 1..=64 chars of Unicode
 //! letters/digits/`_`/`-`, opened only at start-of-text or
@@ -26,7 +23,6 @@
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use index_guest::search::DEFAULT_POSTING_CAP;
 use index_guest::{Fail, MAX_SCAN_LIMIT, StateRead, Writes};
 
 use super::{
@@ -54,18 +50,38 @@ pub struct TagRow {
 #[derive(Debug, Serialize, Deserialize)]
 struct TagCat {
     count: u64,
+    last_seq: u64,
 }
 
 // ── keys ────────────────────────────────────────────────────────────────────
 
 /// a tag posting's key. `u64::MAX - seq` keeps per-channel postings newest
 /// first in key order (seq is per-channel, so the inversion never collides).
+#[cfg(test)]
 pub(super) fn tag_key(label: &str, channel: &str, seq: u64) -> String {
-    format!("tag/{label}/{channel}/{:016x}", u64::MAX - seq)
+    tag_key_at(label, channel, seq, seq)
+}
+
+pub(super) fn tag_key_at(label: &str, channel: &str, seq: u64, time: u64) -> String {
+    format!(
+        "tag/{label}/{:016x}/{}/{:016x}",
+        u64::MAX - time,
+        hex_lower(channel.as_bytes()),
+        u64::MAX - seq
+    )
+}
+
+pub(super) fn tag_channel_key_at(label: &str, channel: &str, seq: u64, time: u64) -> String {
+    format!(
+        "tagc/{}/{label}/{:016x}/{:016x}",
+        hex_lower(channel.as_bytes()),
+        u64::MAX - time,
+        u64::MAX - seq
+    )
 }
 
 fn tag_channel_prefix(label: &str, channel: &str) -> String {
-    format!("tag/{label}/{channel}/")
+    format!("tagc/{}/{label}/", hex_lower(channel.as_bytes()))
 }
 
 fn tag_prefix(label: &str) -> String {
@@ -73,13 +89,30 @@ fn tag_prefix(label: &str) -> String {
 }
 
 pub(super) fn catalog_key(channel: &str, label: &str) -> String {
-    format!("tagcat/{channel}/{label}")
+    format!("tagcat/{}/{label}", hex_lower(channel.as_bytes()))
+}
+
+fn global_catalog_key(label: &str) -> String {
+    format!("tagcat/g/{label}")
+}
+
+fn rank_key(scope: &str, label: &str, count: u64) -> String {
+    format!("{scope}{:016x}/{label}", u64::MAX - count)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// the catalog value for `count` — one encoder so every write path produces
 /// byte-identical entries.
-fn encode_catalog(count: u64) -> Result<Vec<u8>, Fail> {
-    serde_json::to_vec(&TagCat { count }).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
+fn encode_catalog(count: u64, last_seq: u64) -> Result<Vec<u8>, Fail> {
+    serde_json::to_vec(&TagCat { count, last_seq })
+        .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
 }
 
 // ── extraction ──────────────────────────────────────────────────────────────
@@ -165,7 +198,11 @@ pub(super) fn labels(blocks: &[Block]) -> Vec<String> {
 /// counterpart of the postings `put_row_and_toks` emits).
 pub(super) fn delete_postings(out: &mut Writes, row: &MsgRow) {
     for label in &row.tags {
-        index_guest::delete(out, tag_key(label, &row.channel_id, row.seq));
+        index_guest::delete(out, tag_key_at(label, &row.channel_id, row.seq, row.time));
+        index_guest::delete(
+            out,
+            tag_channel_key_at(label, &row.channel_id, row.seq, row.time),
+        );
     }
 }
 
@@ -178,12 +215,13 @@ pub(super) fn fold_catalog(
     channel: &str,
     old: &[String],
     new: &[String],
+    seq: u64,
 ) -> Result<(), Fail> {
     for label in new.iter().filter(|l| !old.contains(l)) {
-        bump(read, out, channel, label, 1)?;
+        bump(read, out, channel, label, 1, seq)?;
     }
     for label in old.iter().filter(|l| !new.contains(l)) {
-        bump(read, out, channel, label, -1)?;
+        bump(read, out, channel, label, -1, seq)?;
     }
     Ok(())
 }
@@ -194,92 +232,127 @@ fn bump(
     channel: &str,
     label: &str,
     delta: i64,
+    seq: u64,
 ) -> Result<(), Fail> {
-    let key = catalog_key(channel, label);
-    let count = match read.get(key.as_bytes()) {
-        Some(bytes) => {
-            serde_json::from_slice::<TagCat>(&bytes)
-                .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?
-                .count
+    bump_scope(
+        read,
+        out,
+        CatalogScope {
+            key: catalog_key(channel, label),
+            rank_prefix: format!("tagrank/c/{}/", hex_lower(channel.as_bytes())),
+            channel,
+            label,
+            delta,
+            seq,
+        },
+    )?;
+    bump_scope(
+        read,
+        out,
+        CatalogScope {
+            key: global_catalog_key(label),
+            rank_prefix: "tagrank/g/".into(),
+            channel: "",
+            label,
+            delta,
+            seq,
+        },
+    )?;
+    Ok(())
+}
+
+fn latest_seq(
+    read: &impl StateRead,
+    label: &str,
+    channel: Option<&str>,
+    skip_channel: &str,
+    skip_seq: u64,
+) -> Result<u64, Fail> {
+    let prefix = match channel {
+        Some(channel) => tag_channel_prefix(label, channel),
+        None => tag_prefix(label),
+    };
+    let mut cursor = None;
+    let mut latest = 0;
+    loop {
+        let page = read.scan_page(prefix.as_bytes(), cursor.as_deref(), MAX_SCAN_LIMIT);
+        for (_, value) in &page.entries {
+            let r = decode_tok(value)?;
+            if r.channel_id == skip_channel && r.seq == skip_seq {
+                continue;
+            }
+            if channel.is_none_or(|wanted| r.channel_id == wanted) {
+                latest = latest.max(r.seq);
+            }
         }
-        None => 0,
-    };
-    let count = if delta >= 0 {
-        count + delta as u64
-    } else {
-        count.saturating_sub(delta.unsigned_abs())
-    };
-    if count == 0 {
-        index_guest::delete(out, key);
-    } else {
-        index_guest::put(out, key, encode_catalog(count)?);
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_after.map(String::into_bytes);
     }
+    Ok(latest)
+}
+
+struct CatalogScope<'a> {
+    key: String,
+    rank_prefix: String,
+    channel: &'a str,
+    label: &'a str,
+    delta: i64,
+    seq: u64,
+}
+
+fn bump_scope(
+    read: &impl StateRead,
+    out: &mut Writes,
+    scope: CatalogScope<'_>,
+) -> Result<(), Fail> {
+    let old = read
+        .get(scope.key.as_bytes())
+        .map(|bytes| {
+            serde_json::from_slice::<TagCat>(&bytes)
+                .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
+        })
+        .transpose()?
+        .unwrap_or(TagCat {
+            count: 0,
+            last_seq: 0,
+        });
+    let count = if scope.delta >= 0 {
+        old.count + scope.delta as u64
+    } else {
+        old.count.saturating_sub(scope.delta.unsigned_abs())
+    };
+    if old.count > 0 {
+        index_guest::delete(out, rank_key(&scope.rank_prefix, scope.label, old.count));
+    }
+    if count == 0 {
+        index_guest::delete(out, scope.key);
+        return Ok(());
+    }
+    let last_seq = if scope.delta >= 0 {
+        old.last_seq.max(scope.seq)
+    } else if old.last_seq == scope.seq {
+        latest_seq(
+            read,
+            scope.label,
+            (!scope.channel.is_empty()).then_some(scope.channel),
+            scope.channel,
+            scope.seq,
+        )?
+    } else {
+        old.last_seq
+    };
+    let cat = encode_catalog(count, last_seq)?;
+    index_guest::put(out, scope.key, cat.clone());
+    index_guest::put(out, rank_key(&scope.rank_prefix, scope.label, count), cat);
     Ok(())
 }
 
 // ── serving ─────────────────────────────────────────────────────────────────
 
-/// walk every entry under `prefix`, page by page.
-fn scan_all<F>(read: &impl StateRead, prefix: &str, mut f: F) -> Result<(), Fail>
-where
-    F: FnMut(&[u8], &[u8]) -> Result<(), Fail>,
-{
-    let mut cursor: Option<String> = None;
-    loop {
-        let page = read.scan_page(
-            prefix.as_bytes(),
-            cursor.as_deref().map(str::as_bytes),
-            MAX_SCAN_LIMIT,
-        );
-        for (key, value) in &page.entries {
-            f(key, value)?;
-        }
-        match page.next_after {
-            Some(next) if page.has_more => cursor = Some(next),
-            _ => break,
-        }
-    }
-    Ok(())
-}
-
 fn decode_tok(value: &[u8]) -> Result<TokRef, Fail> {
     serde_json::from_slice(value).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
-}
-
-/// a label's newest live seq in one channel: the first posting under the
-/// channel prefix WHOSE STORED REF names that channel, or None when no such
-/// posting is live. the prefix alone is not scope — `tag/{label}/g/` also
-/// matches a sub-channel like `g/0`, whose keys can even sort AHEAD of `g`'s
-/// own hex rseqs — but same-channel keys keep their newest-first order
-/// relative to each other, so the first stored-channel match IS the max.
-/// bounded by the posting cap like every tag walk; a prefix that exhausts the
-/// cap without a match reports none.
-fn newest_seq(read: &impl StateRead, label: &str, channel: &str) -> Result<Option<u64>, Fail> {
-    let prefix = tag_channel_prefix(label, channel);
-    let mut cursor: Option<String> = None;
-    let mut walked = 0usize;
-    loop {
-        let page = read.scan_page(
-            prefix.as_bytes(),
-            cursor.as_deref().map(str::as_bytes),
-            MAX_SCAN_LIMIT,
-        );
-        for (_, value) in &page.entries {
-            if walked == DEFAULT_POSTING_CAP {
-                return Ok(None);
-            }
-            walked += 1;
-            let r = decode_tok(value)?;
-            if r.channel_id == channel {
-                return Ok(Some(r.seq));
-            }
-        }
-        match page.next_after {
-            Some(next) if page.has_more => cursor = Some(next),
-            _ => break,
-        }
-    }
-    Ok(None)
 }
 
 /// the `Tags` query: the catalog of one channel (or, with no channel, every
@@ -288,70 +361,36 @@ fn newest_seq(read: &impl StateRead, label: &str, channel: &str) -> Result<Optio
 pub(super) fn serve_tags(
     read: &impl StateRead,
     channel_id: Option<String>,
+    after: Option<String>,
     limit: Option<usize>,
-) -> Result<Vec<TagRow>, Fail> {
+) -> Result<(Vec<TagRow>, bool, Option<String>), Fail> {
     let limit = limit
         .unwrap_or(DEFAULT_SEARCH_LIMIT)
         .clamp(1, MAX_SEARCH_LIMIT);
     let prefix = match &channel_id {
-        Some(channel) => format!("tagcat/{channel}/"),
-        None => "tagcat/".to_string(),
+        Some(channel) => format!("tagrank/c/{}/", hex_lower(channel.as_bytes())),
+        None => "tagrank/g/".into(),
     };
-    // label → (aggregated count, channels carrying it — for last_seq probes).
-    let mut agg: std::collections::BTreeMap<String, (u64, Vec<String>)> =
-        std::collections::BTreeMap::new();
-    scan_all(read, &prefix, |key, value| {
+    let page = read.scan_page(
+        prefix.as_bytes(),
+        after.as_deref().map(str::as_bytes),
+        limit,
+    );
+    let mut out = Vec::with_capacity(page.entries.len());
+    for (key, value) in &page.entries {
         let rest = String::from_utf8_lossy(&key[prefix.len()..]);
-        // a label never contains `/` (tag chars only), so the LAST segment is
-        // the label and everything before it is the channel.
-        let (channel, label) = match &channel_id {
-            Some(channel) => {
-                let label = rest.into_owned();
-                // the prefix also matches SUB-channels — `tagcat/g/` catches
-                // channel `g/0`, whose rows would otherwise surface as bogus
-                // labels like `0/shared`. a real label is tag chars only, so
-                // anything that fails the grammar is another channel's row.
-                if !label.chars().all(is_tag_char) {
-                    return Ok(());
-                }
-                (channel.clone(), label)
-            }
-            None => match rest.rsplit_once('/') {
-                Some((channel, label)) => (channel.to_string(), label.to_string()),
-                None => return Ok(()),
-            },
+        let Some((_, label)) = rest.split_once('/') else {
+            continue;
         };
-        let count = serde_json::from_slice::<TagCat>(value)
-            .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?
-            .count;
-        let entry = agg.entry(label).or_insert((0, Vec::new()));
-        entry.0 += count;
-        entry.1.push(channel);
-        Ok(())
-    })?;
-    let mut rows: Vec<(String, u64, Vec<String>)> = agg
-        .into_iter()
-        .map(|(label, (count, channels))| (label, count, channels))
-        .collect();
-    // count desc, then tag asc (the BTreeMap already yields labels ascending,
-    // and the sort is stable).
-    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
-    rows.truncate(limit);
-    let mut out = Vec::with_capacity(rows.len());
-    for (label, count, channels) in rows {
-        let mut last_seq = 0u64;
-        for channel in &channels {
-            if let Some(seq) = newest_seq(read, &label, channel)? {
-                last_seq = last_seq.max(seq);
-            }
-        }
+        let cat: TagCat =
+            serde_json::from_slice(value).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?;
         out.push(TagRow {
-            tag: label,
-            count,
-            last_seq,
+            tag: label.into(),
+            count: cat.count,
+            last_seq: cat.last_seq,
         });
     }
-    Ok(out)
+    Ok((out, page.has_more, page.next_after))
 }
 
 /// the `TagSearch` query: every live message carrying EXACTLY `tag` (the
@@ -365,8 +404,9 @@ pub(super) fn serve_tag_search(
     read: &impl StateRead,
     tag: &str,
     channel_id: Option<String>,
+    after: Option<String>,
     limit: Option<usize>,
-) -> Result<Vec<MsgRow>, Fail> {
+) -> Result<(Vec<MsgRow>, bool, Option<String>), Fail> {
     let label = normalize(tag.trim().trim_start_matches('#'));
     if label.is_empty() || label.chars().count() > MAX_TAG_CHARS || !label.chars().all(is_tag_char)
     {
@@ -379,43 +419,21 @@ pub(super) fn serve_tag_search(
         Some(channel) => tag_channel_prefix(&label, channel),
         None => tag_prefix(&label),
     };
-    let mut refs: Vec<TokRef> = Vec::new();
-    let mut cursor: Option<String> = None;
-    let mut walked = 0usize;
-    'walk: loop {
-        let page = read.scan_page(
-            prefix.as_bytes(),
-            cursor.as_deref().map(str::as_bytes),
-            MAX_SCAN_LIMIT,
-        );
-        for (_, value) in &page.entries {
-            if walked == DEFAULT_POSTING_CAP {
-                break 'walk;
-            }
-            walked += 1;
-            let r = decode_tok(value)?;
-            if channel_id.as_ref().is_none_or(|c| &r.channel_id == c) {
-                refs.push(r);
-            }
-        }
-        match page.next_after {
-            Some(next) if page.has_more => cursor = Some(next),
-            _ => break,
-        }
-    }
-    // newest first; (channel, seq) tiebreak for a stable order — exactly
-    // `Search`'s ranking.
-    refs.sort_by(|a, b| (b.time, &b.channel_id, b.seq).cmp(&(a.time, &a.channel_id, a.seq)));
-    refs.truncate(limit);
-    let mut hits = Vec::with_capacity(refs.len());
-    for r in refs {
+    let page = read.scan_page(
+        prefix.as_bytes(),
+        after.as_deref().map(str::as_bytes),
+        limit,
+    );
+    let mut hits = Vec::with_capacity(page.entries.len());
+    for (_, value) in &page.entries {
+        let r = decode_tok(value)?;
         if let Some(bytes) = read.get(msg_key(&r.channel_id, r.seq).as_bytes()) {
             let row: MsgRow = serde_json::from_slice(&bytes)
                 .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?;
             hits.push(row);
         }
     }
-    Ok(hits)
+    Ok((hits, page.has_more, page.next_after))
 }
 
 // ── extraction tests ────────────────────────────────────────────────────────

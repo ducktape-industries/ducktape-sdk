@@ -57,7 +57,10 @@ use index_guest::search::{self, DEFAULT_POSTING_CAP};
 use index_guest::{Fail, OpRow, StateRead, Writes, user_handle};
 use serde::{Deserialize, Serialize};
 
-use crate::{Block, ChatAssigned, ChatMsg, Party, PostPolicy, Span, decode_assigned, decode_msg};
+use crate::{
+    Block, ChatAssigned, ChatMsg, MAX_REACTION_EMOJIS, Party, PostPolicy, Span, decode_assigned,
+    decode_msg,
+};
 
 mod tags;
 pub use tags::{MAX_TAG_CHARS, MAX_TAGS_PER_MESSAGE, TagRow};
@@ -118,7 +121,7 @@ pub struct MsgRow {
     pub reply_count: u64,
     pub last_reply_seq: Option<u64>,
     /// live reaction state, emoji-sorted; a tombstone carries none.
-    pub reactions: Vec<ReactionRow>,
+    pub reactions: Vec<ReactionSummary>,
     /// the head's normalized tag labels (appearance order, ≤ 16) — stored so
     /// an edit/delete can diff/clear exactly what this head indexed (the flat
     /// `text` can't re-derive them: it folds code blocks in). tombstones
@@ -126,12 +129,40 @@ pub struct MsgRow {
     pub tags: Vec<String>,
 }
 
-/// one emoji's reactors on a message, rendered handles, both levels sorted
-/// for a deterministic row byte image.
+/// one bounded per-emoji count carried by a message head.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReactionSummary {
+    pub emoji: String,
+    pub count: u64,
+}
+
+/// one emoji's reactors returned by the cursor-paged details view.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReactionRow {
     pub emoji: String,
     pub reactors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReactionPage {
+    pub reactions: Vec<ReactionRow>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageHits {
+    pub hits: Vec<MsgRow>,
+    pub capped: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TagPage {
+    pub hits: Vec<MsgRow>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
 }
 
 /// the stored row of one channel: metadata, policy, and the live huddle
@@ -240,7 +271,14 @@ pub enum ChatViewQuery {
         limit: Option<usize>,
     },
     /// one message's live reaction state.
-    Reactions { channel_id: String, seq: u64 },
+    Reactions {
+        channel_id: String,
+        seq: u64,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     /// the channel member roster, ascending by handle, cursor-paged.
     Members {
         channel_id: String,
@@ -262,6 +300,8 @@ pub enum ChatViewQuery {
         #[serde(default)]
         channel_id: Option<String>,
         #[serde(default)]
+        after: Option<String>,
+        #[serde(default)]
         limit: Option<usize>,
     },
     /// live messages carrying one exact tag, newest first:
@@ -270,6 +310,8 @@ pub enum ChatViewQuery {
         tag: String,
         #[serde(default)]
         channel_id: Option<String>,
+        #[serde(default)]
+        after: Option<String>,
         #[serde(default)]
         limit: Option<usize>,
     },
@@ -309,7 +351,7 @@ pub enum ChatViewReply {
         #[serde(skip_serializing_if = "Option::is_none")]
         next_reply_seq: Option<u64>,
     },
-    Reactions(Vec<ReactionRow>),
+    Reactions(ReactionPage),
     /// one cursor page of the member roster.
     Members {
         members: Vec<MemberRow>,
@@ -318,8 +360,14 @@ pub enum ChatViewReply {
         next_after: Option<String>,
     },
     /// search/tag hits, newest first.
-    Hits(Vec<MsgRow>),
-    Tags(Vec<TagRow>),
+    Hits(MessageHits),
+    TagHits(TagPage),
+    Tags {
+        tags: Vec<TagRow>,
+        has_more: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_after: Option<String>,
+    },
 }
 
 fn seq_key(channel: &str) -> String {
@@ -357,6 +405,23 @@ fn member_row_key(channel: &str, handle: &str) -> String {
 
 fn tok_key(token: &str, channel: &str, seq: u64) -> String {
     format!("tok/{token}/{channel}/{seq:016x}")
+}
+
+fn tok_scope_key(token: &str, channel: &str, seq: u64) -> String {
+    format!("toks/{}/{token}/{seq:016x}", hex_lower(channel.as_bytes()))
+}
+
+fn reaction_prefix(channel: &str, seq: u64) -> String {
+    format!("react/{}/{seq:016x}/", hex_lower(channel.as_bytes()))
+}
+
+fn reaction_key(channel: &str, seq: u64, emoji: &str, reactor: &str) -> String {
+    format!(
+        "{}{}/{}",
+        reaction_prefix(channel, seq),
+        hex_lower(emoji.as_bytes()),
+        hex_lower(reactor.as_bytes())
+    )
 }
 
 /// flatten message blocks to the plain text the token index sees.
@@ -467,11 +532,21 @@ fn put_row_and_toks(out: &mut Writes, row: &MsgRow) -> Result<(), Fail> {
             tok_key(&token, &row.channel_id, row.seq),
             tok_ref.clone(),
         );
+        index_guest::put(
+            out,
+            tok_scope_key(&token, &row.channel_id, row.seq),
+            tok_ref.clone(),
+        );
     }
     for label in &row.tags {
         index_guest::put(
             out,
-            tags::tag_key(label, &row.channel_id, row.seq),
+            tags::tag_key_at(label, &row.channel_id, row.seq, row.time),
+            tok_ref.clone(),
+        );
+        index_guest::put(
+            out,
+            tags::tag_channel_key_at(label, &row.channel_id, row.seq, row.time),
             tok_ref.clone(),
         );
     }
@@ -481,6 +556,7 @@ fn put_row_and_toks(out: &mut Writes, row: &MsgRow) -> Result<(), Fail> {
 fn delete_toks(out: &mut Writes, row: &MsgRow) {
     for token in search::tokens(&row.text) {
         index_guest::delete(out, tok_key(&token, &row.channel_id, row.seq));
+        index_guest::delete(out, tok_scope_key(&token, &row.channel_id, row.seq));
     }
 }
 
@@ -657,7 +733,7 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
                 tags: tag_labels,
                 channel_id,
             };
-            tags::fold_catalog(read, &mut out, &row.channel_id, &[], &row.tags)?;
+            tags::fold_catalog(read, &mut out, &row.channel_id, &[], &row.tags, row.seq)?;
             put_row_and_toks(&mut out, &row)?;
         }
         ChatMsg::EditMessage {
@@ -698,7 +774,14 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
             delete_toks(&mut out, &row);
             tags::delete_postings(&mut out, &row);
             let new_tags = tags::labels(&blocks);
-            tags::fold_catalog(read, &mut out, &row.channel_id, &row.tags, &new_tags)?;
+            tags::fold_catalog(
+                read,
+                &mut out,
+                &row.channel_id,
+                &row.tags,
+                &new_tags,
+                row.seq,
+            )?;
             row.text = plain_text(&blocks);
             row.blocks = blocks;
             row.tags = new_tags;
@@ -714,7 +797,7 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
             };
             delete_toks(&mut out, &row);
             tags::delete_postings(&mut out, &row);
-            tags::fold_catalog(read, &mut out, &row.channel_id, &row.tags, &[])?;
+            tags::fold_catalog(read, &mut out, &row.channel_id, &row.tags, &[], row.seq)?;
             // tombstone: content and reactions cleared, skeleton (thread
             // linkage, reply summary, revision count) kept — the canonical
             // tombstone shape.
@@ -738,24 +821,25 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
                     .participant()
                     .map_err(|e| Fail::new(FAIL_ASSIGNED_DECODE, e))?,
             );
-            let entry = row.reactions.iter_mut().find(|r| r.emoji == emoji);
-            match entry {
-                Some(entry) => {
-                    if entry.reactors.contains(&reactor) {
-                        // idempotent: a duplicate add stages nothing.
-                        return Ok(out);
-                    }
-                    entry.reactors.push(reactor);
-                    entry.reactors.sort();
-                }
-                None => {
-                    row.reactions.push(ReactionRow {
-                        emoji,
-                        reactors: vec![reactor],
-                    });
-                    row.reactions.sort_by(|a, b| a.emoji.cmp(&b.emoji));
-                }
+            let membership = reaction_key(&channel_id, seq, &emoji, &reactor);
+            if read.get(membership.as_bytes()).is_some() {
+                return Ok(out);
             }
+            let Some(summary) = row.reactions.iter_mut().find(|r| r.emoji == emoji) else {
+                if row.reactions.len() >= MAX_REACTION_EMOJIS {
+                    return Ok(out);
+                }
+                row.reactions.push(ReactionSummary {
+                    emoji: emoji.clone(),
+                    count: 1,
+                });
+                row.reactions.sort_by(|a, b| a.emoji.cmp(&b.emoji));
+                index_guest::put(&mut out, membership, Vec::new());
+                put_row(&mut out, &row)?;
+                return Ok(out);
+            };
+            summary.count += 1;
+            index_guest::put(&mut out, membership, Vec::new());
             put_row(&mut out, &row)?;
         }
         ChatMsg::RemoveReaction {
@@ -771,16 +855,16 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
                     .participant()
                     .map_err(|e| Fail::new(FAIL_ASSIGNED_DECODE, e))?,
             );
+            let membership = reaction_key(&channel_id, seq, &emoji, &reactor);
+            if read.get(membership.as_bytes()).is_none() {
+                return Ok(out);
+            }
             let Some(entry) = row.reactions.iter_mut().find(|r| r.emoji == emoji) else {
                 return Ok(out);
             };
-            let before = entry.reactors.len();
-            entry.reactors.retain(|r| r != &reactor);
-            if entry.reactors.len() == before {
-                // exact remove: an absent (emoji, author) is a no-op.
-                return Ok(out);
-            }
-            row.reactions.retain(|r| !r.reactors.is_empty());
+            entry.count = entry.count.saturating_sub(1);
+            row.reactions.retain(|r| r.count != 0);
+            index_guest::delete(&mut out, membership);
             put_row(&mut out, &row)?;
         }
         ChatMsg::RegisterHook {
@@ -891,6 +975,71 @@ fn hex_lower(bytes: &[u8]) -> String {
         out.push_str(&format!("{b:02x}"));
     }
     out
+}
+
+fn hex_decode(text: &str) -> Option<String> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn serve_reactions(
+    read: &impl StateRead,
+    channel: &str,
+    seq: u64,
+    after: Option<String>,
+    limit: Option<usize>,
+) -> Result<ReactionPage, Fail> {
+    let Some(row) = read_row(read, &msg_key(channel, seq))? else {
+        return Ok(ReactionPage {
+            reactions: Vec::new(),
+            has_more: false,
+            next_after: None,
+        });
+    };
+    if row.deleted {
+        return Ok(ReactionPage {
+            reactions: Vec::new(),
+            has_more: false,
+            next_after: None,
+        });
+    }
+    let prefix = reaction_prefix(channel, seq);
+    let page = read.scan_page(
+        prefix.as_bytes(),
+        after.as_deref().map(str::as_bytes),
+        clamp_page(limit),
+    );
+    let mut grouped = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for (key, _) in &page.entries {
+        let suffix = String::from_utf8_lossy(key);
+        let Some(suffix) = suffix.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((emoji, reactor)) = suffix.split_once('/') else {
+            continue;
+        };
+        let (Some(emoji), Some(reactor)) = (hex_decode(emoji), hex_decode(reactor)) else {
+            return Err(Fail::new(
+                FAIL_ROW_DECODE,
+                "reaction membership key is not hex",
+            ));
+        };
+        grouped.entry(emoji).or_default().push(reactor);
+    }
+    Ok(ReactionPage {
+        reactions: grouped
+            .into_iter()
+            .map(|(emoji, reactors)| ReactionRow { emoji, reactors })
+            .collect(),
+        has_more: page.has_more,
+        next_after: page.next_after,
+    })
 }
 
 /// one ascending run of message rows for computed sequences. rows absent
@@ -1076,12 +1225,18 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                 has_more: page.has_more,
             })
         }
-        ChatViewQuery::Reactions { channel_id, seq } => {
-            let reactions = read_row(read, &msg_key(&channel_id, seq))?
-                .map(|row| row.reactions)
-                .unwrap_or_default();
-            reply_json(&ChatViewReply::Reactions(reactions))
-        }
+        ChatViewQuery::Reactions {
+            channel_id,
+            seq,
+            after,
+            limit,
+        } => reply_json(&ChatViewReply::Reactions(serve_reactions(
+            read,
+            &channel_id,
+            seq,
+            after,
+            limit,
+        )?)),
         ChatViewQuery::Members {
             channel_id,
             after,
@@ -1115,17 +1270,14 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
             if tokens.is_empty() {
                 return Err(Fail::new(FAIL_BAD_REQUEST, "search text has no tokens"));
             }
-            // each token matches as a prefix, so a partial token can't embed
-            // the channel in the scan prefix: the channel scope goes into the
-            // intersection as a predicate instead, where it is applied before
-            // the cap. newest first, (channel, seq) tiebreak for a stable order.
+            let key_ns = channel_id
+                .as_deref()
+                .map(|channel| format!("toks/{}/", hex_lower(channel.as_bytes())))
+                .unwrap_or_else(|| "tok/".into());
             let found =
-                search::intersect_prefix(read, "tok/", &tokens, DEFAULT_POSTING_CAP, |value| {
+                search::intersect_prefix(read, &key_ns, &tokens, DEFAULT_POSTING_CAP, |value| {
                     let r: TokRef = serde_json::from_slice(value).ok()?;
-                    channel_id
-                        .as_ref()
-                        .is_none_or(|c| &r.channel_id == c)
-                        .then_some((r.time, r.channel_id, r.seq))
+                    Some((r.time, r.channel_id, r.seq))
                 });
             let refs: Vec<TokRef> = found
                 .hits
@@ -1135,6 +1287,7 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
             let limit = limit
                 .unwrap_or(DEFAULT_SEARCH_LIMIT)
                 .clamp(1, MAX_SEARCH_LIMIT);
+            let capped = found.capped || refs.len() > limit;
             let mut hits = Vec::new();
             for r in refs.into_iter().take(limit) {
                 if let Some(bytes) = read.get(msg_key(&r.channel_id, r.seq).as_bytes()) {
@@ -1143,22 +1296,36 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                     hits.push(row);
                 }
             }
-            serde_json::to_vec(&ChatViewReply::Hits(hits))
+            serde_json::to_vec(&ChatViewReply::Hits(MessageHits { hits, capped }))
                 .map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
         }
-        ChatViewQuery::Tags { channel_id, limit } => {
-            let rows = tags::serve_tags(read, channel_id, limit)?;
-            serde_json::to_vec(&ChatViewReply::Tags(rows))
-                .map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
+        ChatViewQuery::Tags {
+            channel_id,
+            after,
+            limit,
+        } => {
+            let (tags, has_more, next_after) = tags::serve_tags(read, channel_id, after, limit)?;
+            serde_json::to_vec(&ChatViewReply::Tags {
+                tags,
+                has_more,
+                next_after,
+            })
+            .map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
         }
         ChatViewQuery::TagSearch {
             tag,
             channel_id,
+            after,
             limit,
         } => {
-            let hits = tags::serve_tag_search(read, &tag, channel_id, limit)?;
-            serde_json::to_vec(&ChatViewReply::Hits(hits))
-                .map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
+            let (hits, has_more, next_after) =
+                tags::serve_tag_search(read, &tag, channel_id, after, limit)?;
+            serde_json::to_vec(&ChatViewReply::TagHits(TagPage {
+                hits,
+                has_more,
+                next_after,
+            }))
+            .map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
         }
     }
 }
@@ -1241,7 +1408,8 @@ mod tests {
     fn search(map: &Map, req: serde_json::Value) -> Vec<MsgRow> {
         let bytes = serve_view(map, &serde_json::to_vec(&req).unwrap()).expect("view");
         match serde_json::from_slice(&bytes).expect("reply decodes") {
-            ChatViewReply::Hits(hits) => hits,
+            ChatViewReply::Hits(MessageHits { hits, .. })
+            | ChatViewReply::TagHits(TagPage { hits, .. }) => hits,
             other => panic!("expected hits, got {other:?}"),
         }
     }
@@ -1349,7 +1517,7 @@ mod tests {
         assert_eq!(channel.huddle[0].party, "acct:7");
         let message = read_row(&map, &msg_key("g", 1)).unwrap().unwrap();
         assert_eq!(message.author, "acct:7");
-        assert_eq!(message.reactions[0].reactors, vec!["acct:7"]);
+        assert_eq!(message.reactions[0].count, 1);
     }
 
     #[test]
@@ -1912,22 +2080,45 @@ mod tests {
         fold(&mut map, 3, &react("🎉")); // idempotent duplicate
         fold(&mut map, 4, &react("🚀"));
 
-        let ChatViewReply::Reactions(rows) = view(
+        let ChatViewReply::Reactions(ReactionPage {
+            reactions: rows,
+            has_more,
+            next_after,
+        }) = view(
             &map,
-            serde_json::json!({"reactions": {"channel_id": "g", "seq": 1}}),
-        ) else {
+            serde_json::json!({"reactions": {"channel_id": "g", "seq": 1, "limit": 1}}),
+        )
+        else {
             panic!("wrong reply shape")
         };
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
+        assert!(has_more);
         assert_eq!(
             rows.iter().map(|r| r.emoji.as_str()).collect::<Vec<_>>(),
-            vec!["🎉", "🚀"],
+            vec!["🎉"],
             "emoji-sorted"
         );
         assert_eq!(
             rows[0].reactors,
             vec!["user:jess"],
             "duplicate add collapsed"
+        );
+        let after = next_after.expect("reaction cursor");
+        let ChatViewReply::Reactions(ReactionPage {
+            reactions: rows, ..
+        }) = view(
+            &map,
+            serde_json::json!({"reactions": {
+                "channel_id": "g", "seq": 1, "after": after, "limit": 1
+            }}),
+        )
+        else {
+            panic!("wrong reaction continuation")
+        };
+        assert_eq!(rows[0].emoji, "🚀");
+        assert_eq!(
+            read_row(&map, &msg_key("g", 1)).unwrap().unwrap().reactions[0].count,
+            1
         );
 
         fold(
@@ -1939,10 +2130,13 @@ mod tests {
                 emoji: "🎉".into(),
             },
         );
-        let ChatViewReply::Reactions(rows) = view(
+        let ChatViewReply::Reactions(ReactionPage {
+            reactions: rows, ..
+        }) = view(
             &map,
             serde_json::json!({"reactions": {"channel_id": "g", "seq": 1}}),
-        ) else {
+        )
+        else {
             panic!("wrong reply shape")
         };
         assert_eq!(rows.len(), 1, "empty emoji entries drop");
@@ -1955,10 +2149,13 @@ mod tests {
                 seq: 1,
             },
         );
-        let ChatViewReply::Reactions(rows) = view(
+        let ChatViewReply::Reactions(ReactionPage {
+            reactions: rows, ..
+        }) = view(
             &map,
             serde_json::json!({"reactions": {"channel_id": "g", "seq": 1}}),
-        ) else {
+        )
+        else {
             panic!("wrong reply shape")
         };
         assert!(rows.is_empty(), "a tombstone carries no reactions");

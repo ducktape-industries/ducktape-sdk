@@ -1246,12 +1246,12 @@ pub fn chat_message(row: MsgRow, reader: ChatReader<'_>, chain: &ChainId) -> Cha
             .reactions
             .into_iter()
             .map(|reaction| {
-                let reacted_by_me = reacted_by_reader(&reaction.reactors, reader);
+                let reacted_by_me = false;
                 ChatReaction {
                     emoji: reaction.emoji,
-                    count: count_i64(reaction.reactors.len()),
+                    count: count_i64(reaction.count as usize),
                     reacted_by_me,
-                    reactors: reaction.reactors,
+                    reactors: Vec::new(),
                 }
             })
             .collect(),
@@ -1263,6 +1263,7 @@ pub fn chat_message(row: MsgRow, reader: ChatReader<'_>, chain: &ChainId) -> Cha
 /// True when the reader's OWN signing key (`user:{hex}`, never the account)
 /// is among a reaction's reactors — a phone's reaction must not light up
 /// "reacted by me" on the laptop just because both keys share an account.
+#[allow(dead_code)]
 fn reacted_by_reader(reactors: &[String], reader: ChatReader<'_>) -> bool {
     reactors.iter().any(|reactor| reader.is_this_key(reactor))
 }
@@ -2188,7 +2189,7 @@ mod tests {
     /// replacement row renders differently — and keeps it when it does not.
     #[test]
     fn construction_seeds_render_rev_from_rendered_content() {
-        let row = |reactions: Vec<index::ReactionRow>| MsgRow {
+        let row = |reactions: Vec<index::ReactionSummary>| MsgRow {
             channel_id: "general".into(),
             seq: 7,
             message_id: "m7".into(),
@@ -2215,9 +2216,9 @@ mod tests {
             "identical content seeds identically — the cached subtree is kept"
         );
         let reacted = chat_message(
-            row(vec![index::ReactionRow {
+            row(vec![index::ReactionSummary {
                 emoji: "👍".into(),
-                reactors: vec!["user:cd".into()],
+                count: 1,
             }]),
             ChatReader::nobody(),
             &chain(),
