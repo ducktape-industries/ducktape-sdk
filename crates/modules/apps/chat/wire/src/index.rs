@@ -996,10 +996,13 @@ fn hex_decode(text: &str) -> Option<String> {
 }
 
 fn validate_viewer_handles(handles: Vec<String>) -> Result<Vec<String>, Fail> {
-    if !(1..=2).contains(&handles.len()) {
+    if handles.is_empty() {
+        return Ok(handles);
+    }
+    if handles.len() > 2 {
         return Err(Fail::new(
             FAIL_BAD_REQUEST,
-            "viewer_handles must contain one user handle and at most one account handle",
+            "viewer_handles must be empty or contain one user handle and at most one account handle",
         ));
     }
     let mut users = 0;
@@ -2344,6 +2347,7 @@ mod tests {
         assert_eq!(summary(&map, &["user:active", "acct:7"]), Some((2, true)));
         assert_eq!(summary(&map, &["user:historic"]), Some((2, true)));
         assert_eq!(summary(&map, &["user:other"]), Some((2, false)));
+        assert_eq!(summary(&map, &[]), Some((2, false)));
 
         // The viewer owns both canonical handles. Removing one keeps the OR
         // bit true; replaying that idempotent remove changes nothing.
@@ -2355,7 +2359,6 @@ mod tests {
         assert_eq!(summary(&map, &["user:historic", "acct:7"]), None);
 
         for handles in [
-            serde_json::json!([]),
             serde_json::json!(["acct:7"]),
             serde_json::json!(["user:active", "user:active"]),
             serde_json::json!(["user:active", "acct:7", "acct:8"]),
