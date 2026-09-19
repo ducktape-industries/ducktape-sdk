@@ -32,8 +32,12 @@ pub const CODE_HASH_LEN: usize = 32;
 /// swap that wants another kind is a new id, like a key-layout change. the
 /// kind steers who verifies the bytes (a validator runs a `Module`'s core;
 /// a `View` has no core and is verified as a view alone) and who seats
-/// them (the host boundary seats modules; the app seats views). the
-/// artifact frame carries the same tag, and the two must agree.
+/// them (the host boundary seats modules; the app seats views; a `Plane`
+/// is seated by the node plane that owns it). the artifact frame carries
+/// the same tag, and the two must agree.
+///
+/// the kind is COMMITTED, so every node decides the same way on one
+/// history: a binary never inspects the bytes to guess what an entry is.
 #[derive(
     BorshSerialize, BorshDeserialize, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq,
 )]
@@ -43,6 +47,10 @@ pub enum Kind {
     Module,
     /// a view and its assets, no consensus code and no state.
     View,
+    /// a hash-pinned artifact some OTHER plane of the node realizes off the
+    /// module boundary — no module core, no view, no registry seat. the
+    /// reachability plane's `ducktape:netstack` guest is the one today.
+    Plane,
 }
 
 /// one genesis seed: the `modules` genesis-config table maps each id to
@@ -362,6 +370,12 @@ mod tests {
             code_hash: vec![6u8; CODE_HASH_LEN],
             lanes: Vec::new(),
         });
+        rt_msg(ModulesMsg::RegisterModule {
+            module_id: "netstack".into(),
+            kind: Kind::Plane,
+            code_hash: vec![7u8; CODE_HASH_LEN],
+            lanes: Vec::new(),
+        });
         rt_msg(ModulesMsg::CancelSwap {
             name: "swap-hello".into(),
             module_id: "hello".into(),
@@ -425,8 +439,10 @@ mod tests {
     fn kind_is_snake_case_on_the_wire() {
         assert_eq!(sdk::wire::encode(&Kind::Module), br#""module""#);
         assert_eq!(sdk::wire::encode(&Kind::View), br#""view""#);
+        assert_eq!(sdk::wire::encode(&Kind::Plane), br#""plane""#);
         assert_eq!(borsh::to_vec(&Kind::Module).unwrap(), [0]);
         assert_eq!(borsh::to_vec(&Kind::View).unwrap(), [1]);
+        assert_eq!(borsh::to_vec(&Kind::Plane).unwrap(), [2]);
         let seed = Seed {
             kind: Kind::View,
             code_hash: vec![7u8; CODE_HASH_LEN],
