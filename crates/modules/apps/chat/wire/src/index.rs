@@ -134,6 +134,7 @@ pub struct MsgRow {
 pub struct ReactionSummary {
     pub emoji: String,
     pub count: u64,
+    pub reacted_by_me: bool,
 }
 
 /// one emoji's reactors returned by the cursor-paged details view.
@@ -244,6 +245,7 @@ pub enum ChatViewQuery {
     /// root sequence in the page; storage keys never cross this boundary.
     Roots {
         channel_id: String,
+        viewer_handles: Vec<String>,
         #[serde(default)]
         before_seq: Option<u64>,
         #[serde(default)]
@@ -254,17 +256,26 @@ pub enum ChatViewQuery {
     MessagesAround {
         channel_id: String,
         seq: u64,
+        viewer_handles: Vec<String>,
         #[serde(default)]
         limit: Option<usize>,
     },
     /// global message-id lookup.
-    Message { message_id: String },
+    Message {
+        message_id: String,
+        viewer_handles: Vec<String>,
+    },
     /// the immutable edit history of one message, ascending by revision.
-    Revisions { channel_id: String, seq: u64 },
+    Revisions {
+        channel_id: String,
+        seq: u64,
+        viewer_handles: Vec<String>,
+    },
     /// the thread root plus one cursor-paged run of replies, post order.
     Thread {
         channel_id: String,
         root_seq: u64,
+        viewer_handles: Vec<String>,
         #[serde(default)]
         after_reply_seq: Option<u64>,
         #[serde(default)]
@@ -289,6 +300,7 @@ pub enum ChatViewQuery {
     },
     Search {
         text: String,
+        viewer_handles: Vec<String>,
         #[serde(default)]
         channel_id: Option<String>,
         #[serde(default)]
@@ -308,6 +320,7 @@ pub enum ChatViewQuery {
     /// `{"tag_search": {"tag": "rust", "channel_id": "...", "limit": 20}}`.
     TagSearch {
         tag: String,
+        viewer_handles: Vec<String>,
         #[serde(default)]
         channel_id: Option<String>,
         #[serde(default)]
@@ -733,7 +746,7 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
                 tags: tag_labels,
                 channel_id,
             };
-            tags::fold_catalog(read, &mut out, &row.channel_id, &[], &row.tags, row.seq)?;
+            tags::fold_catalog(read, &mut out, &row.channel_id, &[], &row.tags)?;
             put_row_and_toks(&mut out, &row)?;
         }
         ChatMsg::EditMessage {
@@ -774,14 +787,7 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
             delete_toks(&mut out, &row);
             tags::delete_postings(&mut out, &row);
             let new_tags = tags::labels(&blocks);
-            tags::fold_catalog(
-                read,
-                &mut out,
-                &row.channel_id,
-                &row.tags,
-                &new_tags,
-                row.seq,
-            )?;
+            tags::fold_catalog(read, &mut out, &row.channel_id, &row.tags, &new_tags)?;
             row.text = plain_text(&blocks);
             row.blocks = blocks;
             row.tags = new_tags;
@@ -797,7 +803,7 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
             };
             delete_toks(&mut out, &row);
             tags::delete_postings(&mut out, &row);
-            tags::fold_catalog(read, &mut out, &row.channel_id, &row.tags, &[], row.seq)?;
+            tags::fold_catalog(read, &mut out, &row.channel_id, &row.tags, &[])?;
             // tombstone: content and reactions cleared, skeleton (thread
             // linkage, reply summary, revision count) kept — the canonical
             // tombstone shape.
@@ -832,6 +838,7 @@ pub fn fold_op(op: &OpRow, read: &impl StateRead) -> Result<Writes, Fail> {
                 row.reactions.push(ReactionSummary {
                     emoji: emoji.clone(),
                     count: 1,
+                    reacted_by_me: false,
                 });
                 row.reactions.sort_by(|a, b| a.emoji.cmp(&b.emoji));
                 index_guest::put(&mut out, membership, Vec::new());
@@ -988,6 +995,65 @@ fn hex_decode(text: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn validate_viewer_handles(handles: Vec<String>) -> Result<Vec<String>, Fail> {
+    if !(1..=2).contains(&handles.len()) {
+        return Err(Fail::new(
+            FAIL_BAD_REQUEST,
+            "viewer_handles must contain one user handle and at most one account handle",
+        ));
+    }
+    let mut users = 0;
+    let mut accounts = 0;
+    let mut canonical = std::collections::BTreeSet::new();
+    for handle in handles {
+        let valid = match handle.split_once(':') {
+            Some(("user", value)) => {
+                users += 1;
+                !value.is_empty() && !value.chars().any(char::is_control)
+            }
+            Some(("acct", value)) => {
+                accounts += 1;
+                value
+                    .parse::<u64>()
+                    .is_ok_and(|number| number.to_string() == value)
+            }
+            _ => false,
+        };
+        if !valid || !canonical.insert(handle) {
+            return Err(Fail::new(FAIL_BAD_REQUEST, "invalid viewer_handles"));
+        }
+    }
+    if users != 1 || accounts > 1 || users + accounts != canonical.len() {
+        return Err(Fail::new(FAIL_BAD_REQUEST, "invalid viewer_handles"));
+    }
+    Ok(canonical.into_iter().collect())
+}
+
+fn hydrate_row(read: &impl StateRead, row: &mut MsgRow, viewer_handles: &[String]) {
+    for reaction in &mut row.reactions {
+        reaction.reacted_by_me = viewer_handles.iter().any(|handle| {
+            read.get(reaction_key(&row.channel_id, row.seq, &reaction.emoji, handle).as_bytes())
+                .is_some()
+        });
+    }
+}
+
+fn hydrate_rows(read: &impl StateRead, rows: &mut [MsgRow], viewer_handles: &[String]) {
+    for row in rows {
+        hydrate_row(read, row, viewer_handles);
+    }
+}
+
+fn hydrate_optional_row(
+    read: &impl StateRead,
+    row: &mut Option<MsgRow>,
+    viewer_handles: &[String],
+) {
+    if let Some(row) = row {
+        hydrate_row(read, row, viewer_handles);
+    }
+}
+
 fn serve_reactions(
     read: &impl StateRead,
     channel: &str,
@@ -1060,7 +1126,12 @@ fn messages_run(
     Ok(rows)
 }
 
-fn reply_messages(rows: Vec<MsgRow>) -> Result<Vec<u8>, Fail> {
+fn reply_messages(
+    read: &impl StateRead,
+    mut rows: Vec<MsgRow>,
+    viewer_handles: &[String],
+) -> Result<Vec<u8>, Fail> {
+    hydrate_rows(read, &mut rows, viewer_handles);
     serde_json::to_vec(&ChatViewReply::Messages(rows))
         .map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
 }
@@ -1107,9 +1178,11 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
         }
         ChatViewQuery::Roots {
             channel_id,
+            viewer_handles,
             before_seq,
             limit,
         } => {
+            let viewer_handles = validate_viewer_handles(viewer_handles)?;
             let prefix = format!("root/{channel_id}/");
             let after = before_seq.map(|seq| root_marker_key(&channel_id, seq));
             let page = read.scan_page(
@@ -1129,6 +1202,7 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                 }
                 roots.push(row);
             }
+            hydrate_rows(read, &mut roots, &viewer_handles);
             roots.reverse();
             let next_before_seq = (page.has_more && !roots.is_empty()).then(|| roots[0].seq);
             reply_json(&ChatViewReply::Roots {
@@ -1140,11 +1214,13 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
         ChatViewQuery::MessagesAround {
             channel_id,
             seq,
+            viewer_handles,
             limit,
         } => {
+            let viewer_handles = validate_viewer_handles(viewer_handles)?;
             let head = read_u64(read, &seq_key(&channel_id));
             if head == 0 {
-                return reply_messages(Vec::new());
+                return reply_messages(read, Vec::new(), &viewer_handles);
             }
             let limit = clamp_page(limit) as u64;
             // a seq of 0 or one past the head names no message: window the
@@ -1152,10 +1228,18 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
             let seq = seq.clamp(1, head);
             let from = seq.saturating_sub(limit / 2).max(1);
             let to = head.min(from.saturating_add(limit - 1));
-            reply_messages(messages_run(read, &channel_id, from, to)?)
+            reply_messages(
+                read,
+                messages_run(read, &channel_id, from, to)?,
+                &viewer_handles,
+            )
         }
-        ChatViewQuery::Message { message_id } => {
-            let row = match read.get(msgid_key(&message_id).as_bytes()) {
+        ChatViewQuery::Message {
+            message_id,
+            viewer_handles,
+        } => {
+            let viewer_handles = validate_viewer_handles(viewer_handles)?;
+            let mut row = match read.get(msgid_key(&message_id).as_bytes()) {
                 Some(bytes) => {
                     let (channel_id, seq): (String, u64) = serde_json::from_slice(&bytes)
                         .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?;
@@ -1163,9 +1247,15 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                 }
                 None => None,
             };
+            hydrate_optional_row(read, &mut row, &viewer_handles);
             reply_json(&ChatViewReply::Message(row))
         }
-        ChatViewQuery::Revisions { channel_id, seq } => {
+        ChatViewQuery::Revisions {
+            channel_id,
+            seq,
+            viewer_handles,
+        } => {
+            let viewer_handles = validate_viewer_handles(viewer_handles)?;
             // MAX_REVISIONS (256) fits one scan page, so no cursor.
             let prefix = format!("rev/{channel_id}/{seq:016x}/");
             let page = read.scan_page(prefix.as_bytes(), None, MAX_PAGE_LIMIT);
@@ -1176,14 +1266,17 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                         .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?,
                 );
             }
+            hydrate_rows(read, &mut rows, &viewer_handles);
             reply_json(&ChatViewReply::Revisions(rows))
         }
         ChatViewQuery::Thread {
             channel_id,
             root_seq,
+            viewer_handles,
             after_reply_seq,
             limit,
         } => {
+            let viewer_handles = validate_viewer_handles(viewer_handles)?;
             let is_root = |row: &MsgRow| row.thread.is_none();
             let root = read_row(read, &msg_key(&channel_id, root_seq))?.filter(is_root);
             if root.is_none() {
@@ -1217,6 +1310,9 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                 }
                 replies.push(row);
             }
+            let mut root = root;
+            hydrate_optional_row(read, &mut root, &viewer_handles);
+            hydrate_rows(read, &mut replies, &viewer_handles);
             reply_json(&ChatViewReply::Thread {
                 root,
                 next_reply_seq: (page.has_more && !replies.is_empty())
@@ -1263,9 +1359,11 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
         }
         ChatViewQuery::Search {
             text,
+            viewer_handles,
             channel_id,
             limit,
         } => {
+            let viewer_handles = validate_viewer_handles(viewer_handles)?;
             let tokens: Vec<String> = search::tokens(&text).into_iter().collect();
             if tokens.is_empty() {
                 return Err(Fail::new(FAIL_BAD_REQUEST, "search text has no tokens"));
@@ -1296,6 +1394,7 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
                     hits.push(row);
                 }
             }
+            hydrate_rows(read, &mut hits, &viewer_handles);
             serde_json::to_vec(&ChatViewReply::Hits(MessageHits { hits, capped }))
                 .map_err(|e| Fail::new(FAIL_BAD_REQUEST, e.to_string()))
         }
@@ -1314,12 +1413,15 @@ pub fn serve_view(read: &impl StateRead, req: &[u8]) -> Result<Vec<u8>, Fail> {
         }
         ChatViewQuery::TagSearch {
             tag,
+            viewer_handles,
             channel_id,
             after,
             limit,
         } => {
-            let (hits, has_more, next_after) =
+            let viewer_handles = validate_viewer_handles(viewer_handles)?;
+            let (mut hits, has_more, next_after) =
                 tags::serve_tag_search(read, &tag, channel_id, after, limit)?;
+            hydrate_rows(read, &mut hits, &viewer_handles);
             serde_json::to_vec(&ChatViewReply::TagHits(TagPage {
                 hits,
                 has_more,
@@ -1405,8 +1507,31 @@ mod tests {
         apply_to_map(map, writes);
     }
 
+    fn with_viewer(mut req: serde_json::Value) -> serde_json::Value {
+        if let Some(root) = req.as_object_mut() {
+            for name in [
+                "roots",
+                "messages_around",
+                "message",
+                "revisions",
+                "thread",
+                "search",
+                "tag_search",
+            ] {
+                if let Some(body) = root
+                    .get_mut(name)
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    body.entry("viewer_handles")
+                        .or_insert_with(|| serde_json::json!(["user:jess"]));
+                }
+            }
+        }
+        req
+    }
+
     fn search(map: &Map, req: serde_json::Value) -> Vec<MsgRow> {
-        let bytes = serve_view(map, &serde_json::to_vec(&req).unwrap()).expect("view");
+        let bytes = serve_view(map, &serde_json::to_vec(&with_viewer(req)).unwrap()).expect("view");
         match serde_json::from_slice(&bytes).expect("reply decodes") {
             ChatViewReply::Hits(MessageHits { hits, .. })
             | ChatViewReply::TagHits(TagPage { hits, .. }) => hits,
@@ -1787,7 +1912,7 @@ mod tests {
     // ---- the read model --------------------------------------------------
 
     fn view(map: &Map, req: serde_json::Value) -> ChatViewReply {
-        let bytes = serve_view(map, &serde_json::to_vec(&req).unwrap()).expect("view");
+        let bytes = serve_view(map, &serde_json::to_vec(&with_viewer(req)).unwrap()).expect("view");
         serde_json::from_slice(&bytes).expect("reply decodes")
     }
 
@@ -2159,6 +2284,66 @@ mod tests {
             panic!("wrong reply shape")
         };
         assert!(rows.is_empty(), "a tombstone carries no reactions");
+    }
+
+    fn add_reaction_as(map: &mut Map, height: u64, party: Party, emoji: &str) {
+        let msg = ChatMsg::AddReaction {
+            channel_id: "g".into(),
+            seq: 1,
+            emoji: emoji.into(),
+        };
+        let writes = fold_op(
+            &op_with(
+                height,
+                &msg,
+                encode_assigned(&ChatAssigned::Participant {
+                    actor: Party::Key(b"jess".to_vec()),
+                    participant: party,
+                }),
+            ),
+            map,
+        )
+        .expect("reaction fold");
+        apply_to_map(map, writes);
+    }
+
+    #[test]
+    fn message_reactions_hydrate_account_and_exact_key_ownership() {
+        let mut map = Map::new();
+        fold(&mut map, 1, &post("g", "m1", "react to me"));
+        add_reaction_as(&mut map, 2, Party::Account(7), "👍");
+        add_reaction_as(&mut map, 3, Party::Key(b"historic".to_vec()), "👍");
+
+        let reacted = |viewer_handles: &[&str]| {
+            let reply = view(
+                &map,
+                serde_json::json!({"message": {
+                    "message_id": "m1",
+                    "viewer_handles": viewer_handles
+                }}),
+            );
+            let ChatViewReply::Message(Some(row)) = reply else {
+                panic!("message lookup")
+            };
+            row.reactions[0].reacted_by_me
+        };
+        assert!(reacted(&["user:active", "acct:7"]));
+        assert!(reacted(&["user:historic"]));
+        assert!(!reacted(&["user:other"]));
+
+        for handles in [
+            serde_json::json!([]),
+            serde_json::json!(["acct:7"]),
+            serde_json::json!(["user:active", "user:active"]),
+            serde_json::json!(["user:active", "acct:7", "acct:8"]),
+            serde_json::json!(["account:7"]),
+        ] {
+            let req = serde_json::json!({"message": {
+                "message_id": "m1", "viewer_handles": handles
+            }});
+            let err = serve_view(&map, &serde_json::to_vec(&req).unwrap()).unwrap_err();
+            assert_eq!(err.code, FAIL_BAD_REQUEST);
+        }
     }
 
     #[test]

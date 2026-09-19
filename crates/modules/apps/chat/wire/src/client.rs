@@ -1245,14 +1245,11 @@ pub fn chat_message(row: MsgRow, reader: ChatReader<'_>, chain: &ChainId) -> Cha
         reactions: row
             .reactions
             .into_iter()
-            .map(|reaction| {
-                let reacted_by_me = false;
-                ChatReaction {
-                    emoji: reaction.emoji,
-                    count: count_i64(reaction.count as usize),
-                    reacted_by_me,
-                    reactors: Vec::new(),
-                }
+            .map(|reaction| ChatReaction {
+                emoji: reaction.emoji,
+                count: count_i64(reaction.count as usize),
+                reacted_by_me: reaction.reacted_by_me,
+                reactors: Vec::new(),
             })
             .collect(),
         render_rev: 0,
@@ -2219,6 +2216,7 @@ mod tests {
             row(vec![index::ReactionSummary {
                 emoji: "👍".into(),
                 count: 1,
+                reacted_by_me: true,
             }]),
             ChatReader::nobody(),
             &chain(),
@@ -2227,6 +2225,7 @@ mod tests {
             plain.render_rev, reacted.render_rev,
             "a replacement row with reactions the displayed copy never saw moves the key"
         );
+        assert!(reacted.reactions[0].reacted_by_me);
 
         // the optimistic mint seeds too. NOTE the seed follows the manual
         // `Hash` contract, which excludes body/blocks: under ONE id a pending

@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use index_guest::{Fail, MAX_SCAN_LIMIT, StateRead, Writes};
+use index_guest::{Fail, StateRead, Writes};
 
 use super::{
     DEFAULT_SEARCH_LIMIT, FAIL_BAD_REQUEST, FAIL_ROW_DECODE, MAX_SEARCH_LIMIT, MsgRow, TokRef,
@@ -45,12 +45,11 @@ pub struct TagRow {
     pub last_seq: u64,
 }
 
-/// the stored catalog value — live-message count only (see the module doc for
-/// why `last_seq` is deliberately NOT stored).
+/// the stored catalog value — live-message count only. `last_seq` is read from
+/// the newest bounded posting when a catalog row is served.
 #[derive(Debug, Serialize, Deserialize)]
 struct TagCat {
     count: u64,
-    last_seq: u64,
 }
 
 // ── keys ────────────────────────────────────────────────────────────────────
@@ -110,9 +109,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 /// the catalog value for `count` — one encoder so every write path produces
 /// byte-identical entries.
-fn encode_catalog(count: u64, last_seq: u64) -> Result<Vec<u8>, Fail> {
-    serde_json::to_vec(&TagCat { count, last_seq })
-        .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
+fn encode_catalog(count: u64) -> Result<Vec<u8>, Fail> {
+    serde_json::to_vec(&TagCat { count }).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
 }
 
 // ── extraction ──────────────────────────────────────────────────────────────
@@ -215,13 +213,12 @@ pub(super) fn fold_catalog(
     channel: &str,
     old: &[String],
     new: &[String],
-    seq: u64,
 ) -> Result<(), Fail> {
     for label in new.iter().filter(|l| !old.contains(l)) {
-        bump(read, out, channel, label, 1, seq)?;
+        bump(read, out, channel, label, 1)?;
     }
     for label in old.iter().filter(|l| !new.contains(l)) {
-        bump(read, out, channel, label, -1, seq)?;
+        bump(read, out, channel, label, -1)?;
     }
     Ok(())
 }
@@ -232,7 +229,6 @@ fn bump(
     channel: &str,
     label: &str,
     delta: i64,
-    seq: u64,
 ) -> Result<(), Fail> {
     bump_scope(
         read,
@@ -240,10 +236,8 @@ fn bump(
         CatalogScope {
             key: catalog_key(channel, label),
             rank_prefix: format!("tagrank/c/{}/", hex_lower(channel.as_bytes())),
-            channel,
             label,
             delta,
-            seq,
         },
     )?;
     bump_scope(
@@ -252,54 +246,18 @@ fn bump(
         CatalogScope {
             key: global_catalog_key(label),
             rank_prefix: "tagrank/g/".into(),
-            channel: "",
             label,
             delta,
-            seq,
         },
     )?;
     Ok(())
 }
 
-fn latest_seq(
-    read: &impl StateRead,
-    label: &str,
-    channel: Option<&str>,
-    skip_channel: &str,
-    skip_seq: u64,
-) -> Result<u64, Fail> {
-    let prefix = match channel {
-        Some(channel) => tag_channel_prefix(label, channel),
-        None => tag_prefix(label),
-    };
-    let mut cursor = None;
-    let mut latest = 0;
-    loop {
-        let page = read.scan_page(prefix.as_bytes(), cursor.as_deref(), MAX_SCAN_LIMIT);
-        for (_, value) in &page.entries {
-            let r = decode_tok(value)?;
-            if r.channel_id == skip_channel && r.seq == skip_seq {
-                continue;
-            }
-            if channel.is_none_or(|wanted| r.channel_id == wanted) {
-                latest = latest.max(r.seq);
-            }
-        }
-        if !page.has_more {
-            break;
-        }
-        cursor = page.next_after.map(String::into_bytes);
-    }
-    Ok(latest)
-}
-
 struct CatalogScope<'a> {
     key: String,
     rank_prefix: String,
-    channel: &'a str,
     label: &'a str,
     delta: i64,
-    seq: u64,
 }
 
 fn bump_scope(
@@ -314,10 +272,7 @@ fn bump_scope(
                 .map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
         })
         .transpose()?
-        .unwrap_or(TagCat {
-            count: 0,
-            last_seq: 0,
-        });
+        .unwrap_or(TagCat { count: 0 });
     let count = if scope.delta >= 0 {
         old.count + scope.delta as u64
     } else {
@@ -330,20 +285,7 @@ fn bump_scope(
         index_guest::delete(out, scope.key);
         return Ok(());
     }
-    let last_seq = if scope.delta >= 0 {
-        old.last_seq.max(scope.seq)
-    } else if old.last_seq == scope.seq {
-        latest_seq(
-            read,
-            scope.label,
-            (!scope.channel.is_empty()).then_some(scope.channel),
-            scope.channel,
-            scope.seq,
-        )?
-    } else {
-        old.last_seq
-    };
-    let cat = encode_catalog(count, last_seq)?;
+    let cat = encode_catalog(count)?;
     index_guest::put(out, scope.key, cat.clone());
     index_guest::put(out, rank_key(&scope.rank_prefix, scope.label, count), cat);
     Ok(())
@@ -353,6 +295,16 @@ fn bump_scope(
 
 fn decode_tok(value: &[u8]) -> Result<TokRef, Fail> {
     serde_json::from_slice(value).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))
+}
+
+fn validate_cursor(after: Option<&str>, prefix: &str) -> Result<(), Fail> {
+    if after.is_some_and(|cursor| !cursor.starts_with(prefix)) {
+        return Err(Fail::new(
+            FAIL_BAD_REQUEST,
+            "cursor is outside this tag scope",
+        ));
+    }
+    Ok(())
 }
 
 /// the `Tags` query: the catalog of one channel (or, with no channel, every
@@ -371,6 +323,7 @@ pub(super) fn serve_tags(
         Some(channel) => format!("tagrank/c/{}/", hex_lower(channel.as_bytes())),
         None => "tagrank/g/".into(),
     };
+    validate_cursor(after.as_deref(), &prefix)?;
     let page = read.scan_page(
         prefix.as_bytes(),
         after.as_deref().map(str::as_bytes),
@@ -384,10 +337,21 @@ pub(super) fn serve_tags(
         };
         let cat: TagCat =
             serde_json::from_slice(value).map_err(|e| Fail::new(FAIL_ROW_DECODE, e.to_string()))?;
+        let posting_prefix = match &channel_id {
+            Some(channel) => tag_channel_prefix(label, channel),
+            None => tag_prefix(label),
+        };
+        let last_seq = read
+            .scan_page(posting_prefix.as_bytes(), None, 1)
+            .entries
+            .first()
+            .map(|(_, value)| decode_tok(value).map(|posting| posting.seq))
+            .transpose()?
+            .unwrap_or(0);
         out.push(TagRow {
             tag: label.into(),
             count: cat.count,
-            last_seq: cat.last_seq,
+            last_seq,
         });
     }
     Ok((out, page.has_more, page.next_after))
@@ -419,6 +383,7 @@ pub(super) fn serve_tag_search(
         Some(channel) => tag_channel_prefix(&label, channel),
         None => tag_prefix(&label),
     };
+    validate_cursor(after.as_deref(), &prefix)?;
     let page = read.scan_page(
         prefix.as_bytes(),
         after.as_deref().map(str::as_bytes),

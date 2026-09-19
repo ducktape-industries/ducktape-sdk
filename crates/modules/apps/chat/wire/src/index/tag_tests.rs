@@ -90,8 +90,23 @@ fn fold(map: &mut Map, height: u64, msg: &ChatMsg) {
     apply_to_map(map, writes);
 }
 
+fn with_viewer(mut req: serde_json::Value) -> serde_json::Value {
+    if let Some(root) = req.as_object_mut() {
+        for name in ["search", "tag_search"] {
+            if let Some(body) = root
+                .get_mut(name)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                body.entry("viewer_handles")
+                    .or_insert_with(|| serde_json::json!(["user:jess"]));
+            }
+        }
+    }
+    req
+}
+
 fn hits(map: &Map, req: serde_json::Value) -> Vec<MsgRow> {
-    let bytes = serve_view(map, &serde_json::to_vec(&req).unwrap()).expect("view");
+    let bytes = serve_view(map, &serde_json::to_vec(&with_viewer(req)).unwrap()).expect("view");
     match serde_json::from_slice(&bytes).expect("reply decodes") {
         ChatViewReply::Hits(super::MessageHits { hits, .. })
         | ChatViewReply::TagHits(super::TagPage { hits, .. }) => hits,
@@ -150,12 +165,12 @@ fn posts_index_tags_and_catalog() {
         ]
     );
 
-    // no channel aggregates counts across channels; last_seq is the max of
-    // the per-channel newest (seq spaces are per-channel).
+    // no channel aggregates counts across channels; last_seq comes from the
+    // one newest posting lookup (seq spaces are per-channel).
     let rows = tag_rows(&map, serde_json::json!({"tags": {}}));
     assert_eq!(rows[0].tag, "rust");
     assert_eq!(rows[0].count, 3);
-    assert_eq!(rows[0].last_seq, 2);
+    assert_eq!(rows[0].last_seq, 1);
 
     // tag search: exact label, newest first, channel scope honored.
     let all = hits(&map, serde_json::json!({"tag_search": {"tag": "rust"}}));
@@ -187,7 +202,8 @@ fn tag_catalog_and_search_are_cursor_pages_and_encoded_scopes_do_not_bleed() {
     let bytes = serve_view(
         &map,
         &serde_json::to_vec(&serde_json::json!({
-            "tag_search": {"tag": "alpha", "channel_id": "g", "limit": 1}
+            "tag_search": {"tag": "alpha", "channel_id": "g", "limit": 1,
+                "viewer_handles": ["user:jess"]}
         }))
         .unwrap(),
     )
@@ -206,7 +222,7 @@ fn tag_catalog_and_search_are_cursor_pages_and_encoded_scopes_do_not_bleed() {
         &map,
         &serde_json::to_vec(&serde_json::json!({"tag_search": {
             "tag": "alpha", "channel_id": "g", "limit": 1,
-            "after": next_after
+            "after": next_after, "viewer_handles": ["user:jess"]
         }}))
         .unwrap(),
     )
@@ -447,7 +463,7 @@ fn invalid_tag_queries_are_view_errors() {
     fold(&mut map, 1, &post("g", "m1", "#ok"));
     let long = "a".repeat(65);
     for bad in ["", "#", "two words", long.as_str()] {
-        let req = serde_json::json!({"tag_search": {"tag": bad}});
+        let req = with_viewer(serde_json::json!({"tag_search": {"tag": bad}}));
         let err = serve_view(&map, &serde_json::to_vec(&req).unwrap()).unwrap_err();
         assert!(
             err.message.contains("not a valid tag"),
