@@ -21,11 +21,12 @@
 //! [`MODULES`] — and everything after it belongs to that module. [`Address`]
 //! keeps the tail as segments and interprets none of it. What a tail MEANS is a
 //! typed address, one public module here per module id ([`pages::PageAddress`],
-//! [`chat::MessageAddress`], [`runs::RunAddress`], [`forge::ForgeRepoAddress`]
-//! and [`forge::ForgeLocator`]): they ship in this crate and not in each
-//! module's wire crate because a view must be able to name a thing without
-//! linking that module's signing and identity graph, which chat-wire, runs-wire
-//! and forge-wire reach and a wasm32 component cannot build. Each module's wire
+//! [`chat::MessageAddress`], [`runs::RunAddress`], [`forge::ForgeRepoAddress`],
+//! [`forge::ForgeLocator`] and [`identity::AccountAddress`]): they ship in this
+//! crate and not in each module's wire crate because a view must be able to
+//! name a thing without linking that module's signing and identity graph, which
+//! chat-wire, runs-wire, forge-wire and identity-wire reach and a wasm32
+//! component cannot build. Each module's wire
 //! crate re-exports its own tail from the path it always had, so a module's
 //! name rule still has one home. files is the exception: `files-wire`'s
 //! `FileAddress` canonicalises its path with duckfs's own rule, which this
@@ -51,6 +52,7 @@ use refusal_class::INVALID_INPUT;
 
 pub mod chat;
 pub mod forge;
+pub mod identity;
 pub mod pages;
 pub mod runs;
 
@@ -67,7 +69,7 @@ const SALT_HEX: std::ops::RangeInclusive<usize> = 8..=64;
 /// the modules that claim a `duck://` name, by registered module id — never an
 /// alias. A name is refused until its module claims it here, so an address for
 /// a module nobody has built cannot be read as one for a module that exists.
-pub const MODULES: [&str; 5] = ["forge", "pages", "chat", "files", "runs"];
+pub const MODULES: [&str; 6] = ["forge", "pages", "chat", "files", "runs", "identity"];
 
 /// the network, as the workspace registry keys it: `<label>#<salt>`.
 ///
@@ -658,10 +660,10 @@ mod tests {
         assert!(sentence("dognet-B5B6EA90".parse::<ChainId>()).contains(UPPERCASE));
     }
 
-    /// five modules claim a name; a sixth is refused by name, and the sentence
-    /// says which five there are.
+    /// six modules claim a name; a seventh is refused by name, and the sentence
+    /// says which six there are.
     #[test]
-    fn five_modules_claim_their_names() {
+    fn six_modules_claim_their_names() {
         for module in MODULES {
             let text = format!("duck://dognet-b5b6ea90/{module}/a");
             assert_eq!(Address::parse(&text).expect("parses").module, module);
@@ -669,7 +671,8 @@ mod tests {
         let refused = refused("duck://dognet-b5b6ea90/boards/a");
         assert!(
             refused.starts_with("`boards` names no ducktape module")
-                && refused.ends_with("one of `forge`, `pages`, `chat`, `files`, `runs`."),
+                && refused
+                    .ends_with("one of `forge`, `pages`, `chat`, `files`, `runs`, `identity`."),
             "{refused}"
         );
     }

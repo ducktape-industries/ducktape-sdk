@@ -31,10 +31,9 @@ use crate::{Error, refusal};
 pub const CONFIG_KEY: &[u8] = b"__config";
 
 /// genesis-config key: the identity chain id (identity/gateway scope their
-/// certificates and `.duck` routes to it; `runs` stamps the `?net=` half of
-/// every `duck://` link it renders into an agent's context with it). a
-/// component names it in its declared shape; the host binds the network's
-/// value.
+/// certificates and `.duck` routes to it; every `duck://` address names its
+/// network by it, in its authority). a component names it in its declared
+/// shape; the host binds the network's value.
 pub const CHAIN_ID: &str = "chain_id";
 /// genesis-config key: the per-network invite namespace (governance verifies
 /// tokens and join proofs against it).

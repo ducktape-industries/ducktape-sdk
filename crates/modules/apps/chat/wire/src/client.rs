@@ -15,6 +15,8 @@
 
 use chat_message::inline_spans;
 pub use chat_message::parse_message;
+use duck_address::ChainId;
+use duck_address::identity::AccountAddress;
 use sha2::{Digest, Sha256};
 
 use crate::index::{self, MsgRow};
@@ -452,8 +454,9 @@ pub struct ChatBlock {
 /// run landing in none vanishes ([`span_arm`] owns the decision).
 ///
 /// `mention_link` rides `mention` the way `link` rides `link_text`: the
-/// `duck://account/<n>` the mention addresses, so the plate is a destination
-/// the reader can hover and open, or "" for a mention of a bare key.
+/// `duck://<chain>/identity/<account>` the mention addresses, so the plate is
+/// a destination the reader can hover and open, or "" for a mention of a bare
+/// key.
 #[derive(Clone, Debug, Hash, PartialEq, Default, serde::Serialize)]
 pub struct ChatSpan {
     pub mention: String,
@@ -549,6 +552,7 @@ pub fn delta_from_op(
     _origin_kind: &str,
     _origin_id: Option<&str>,
     reader: ChatReader<'_>,
+    chain: &ChainId,
     height: u64,
 ) -> Result<Option<ChatDelta>, String> {
     let msg = decode_msg(payload)?;
@@ -645,7 +649,7 @@ pub fn delta_from_op(
                 reactions: Vec::new(),
                 tags: Vec::new(),
             };
-            let message = chat_message(row, reader);
+            let message = chat_message(row, reader, chain);
             match thread {
                 Some(root_seq) => ChatDelta::Reply {
                     channel_id,
@@ -700,7 +704,7 @@ pub fn delta_from_op(
             ChatDelta::Edited {
                 channel_id,
                 seq: number_i64(seq),
-                message: chat_message(carrier, reader),
+                message: chat_message(carrier, reader, chain),
             }
         }
         ChatMsg::DeleteMessage { channel_id, seq } => ChatDelta::Deleted {
@@ -968,9 +972,10 @@ pub fn optimistic_message(
     body: String,
     message_id: String,
     reader: ChatReader<'_>,
+    chain: &ChainId,
 ) -> Vec<ChatMessage> {
     let parsed = parse_message(&body);
-    let blocks = blocks_view_with_names(&parsed, reader.names);
+    let blocks = blocks_view_with_names(&parsed, reader.names, chain);
     let edit_body = draft_body(&parsed);
     let body = message_body_with_names(&parsed, reader.names);
     // A device with no key cannot sign a send, so the keyless mint is a row
@@ -1196,7 +1201,7 @@ pub fn merge_thread_reply(
 // row rendering — MsgRow (the index/feed shape) → the rendered ChatMessage
 // ============================================================================
 
-pub fn chat_message(row: MsgRow, reader: ChatReader<'_>) -> ChatMessage {
+pub fn chat_message(row: MsgRow, reader: ChatReader<'_>, chain: &ChainId) -> ChatMessage {
     let edited = row.rev > 0;
     let meta = if edited {
         format!("#{} · edited", row.seq)
@@ -1206,7 +1211,7 @@ pub fn chat_message(row: MsgRow, reader: ChatReader<'_>) -> ChatMessage {
     let blocks = if row.deleted {
         vec![deleted_block()]
     } else {
-        blocks_view_with_names(&row.blocks, reader.names)
+        blocks_view_with_names(&row.blocks, reader.names, chain)
     };
     let view_key = next_message_view_key();
     ChatMessage {
@@ -1313,13 +1318,21 @@ fn span_text(spans: &[Span]) -> String {
     spans.iter().map(|span| span.text.as_str()).collect()
 }
 
-/// Convert wire `Block`s into the render model the view iterates over.
-pub fn blocks_view(blocks: &[Block]) -> Vec<ChatBlock> {
-    blocks_view_with_names(blocks, &NOBODY_KNOWN)
+/// Convert wire `Block`s into the render model the view iterates over. A
+/// mention of an account links to its address on `chain`.
+pub fn blocks_view(blocks: &[Block], chain: &ChainId) -> Vec<ChatBlock> {
+    blocks_view_with_names(blocks, &NOBODY_KNOWN, chain)
 }
 
-pub fn blocks_view_with_names(blocks: &[Block], names: &NameDirectory) -> Vec<ChatBlock> {
-    named_blocks(blocks, names).iter().map(block_view).collect()
+pub fn blocks_view_with_names(
+    blocks: &[Block],
+    names: &NameDirectory,
+    chain: &ChainId,
+) -> Vec<ChatBlock> {
+    named_blocks(blocks, names)
+        .iter()
+        .map(|block| block_view(block, chain))
+        .collect()
 }
 
 pub fn message_body_with_names(blocks: &[Block], names: &NameDirectory) -> String {
@@ -1436,8 +1449,8 @@ pub fn draft_mentions(
 /// ([`parse_message`]), so a pending row previews what will land instead of
 /// showing raw `**marks**` until the settle replaces it. Unknown accounts use
 /// an account-number label; named optimistic rows use their reader directory.
-pub fn paragraph_blocks(text: &str) -> Vec<ChatBlock> {
-    blocks_view(&parse_message(text))
+pub fn paragraph_blocks(text: &str, chain: &ChainId) -> Vec<ChatBlock> {
+    blocks_view(&parse_message(text), chain)
 }
 
 fn deleted_block() -> ChatBlock {
@@ -1450,10 +1463,10 @@ fn deleted_block() -> ChatBlock {
     }
 }
 
-fn block_view(block: &Block) -> ChatBlock {
+fn block_view(block: &Block, chain: &ChainId) -> ChatBlock {
     match block {
-        Block::Paragraph(spans) => rich_block("paragraph", spans),
-        Block::Quote(spans) => rich_block("quote", spans),
+        Block::Paragraph(spans) => rich_block("paragraph", spans, chain),
+        Block::Quote(spans) => rich_block("quote", spans, chain),
         Block::Code { lang, text } => ChatBlock {
             kind: "code".into(),
             text: text.clone(),
@@ -1474,14 +1487,18 @@ fn block_view(block: &Block) -> ChatBlock {
 /// A paragraph/quote block. Plain runs keep their exact text for a single
 /// wrapping `text`; any inline mark switches to run-level `spans` the view's
 /// single rich-text paragraph expands with its `for`.
-fn rich_block(kind: &str, spans: &[Span]) -> ChatBlock {
+fn rich_block(kind: &str, spans: &[Span], chain: &ChainId) -> ChatBlock {
     let marked = spans.iter().any(|span| !span.marks.is_empty());
     ChatBlock {
         kind: kind.into(),
         text: span_text(spans),
         lang: String::new(),
         rich: marked,
-        spans: if marked { run_spans(spans) } else { Vec::new() },
+        spans: if marked {
+            run_spans(spans, chain)
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -1491,8 +1508,8 @@ fn rich_block(kind: &str, spans: &[Span]) -> ChatBlock {
 /// WHICH [`ChatSpan`] text field carries the run.
 enum SpanArm {
     Link(String),
-    /// the `duck://account/<n>` the mention addresses, or "" for a mention
-    /// that names a bare key
+    /// the `duck://<chain>/identity/<account>` the mention addresses, or ""
+    /// for a mention that names a bare key
     Mention(String),
     BoldItalic,
     Bold,
@@ -1503,7 +1520,7 @@ enum SpanArm {
 /// A link outranks every other mark (a bold link is still a destination), a
 /// mention outranks emphasis, and emphasis resolves on the (bold, italic)
 /// pair — the same precedence the per-token view arms encoded.
-fn span_arm(span: &Span) -> SpanArm {
+fn span_arm(span: &Span, chain: &ChainId) -> SpanArm {
     let link = span.marks.iter().find_map(|mark| match mark {
         Mark::Link(url) => Some(url.clone()),
         _ => None,
@@ -1516,7 +1533,7 @@ fn span_arm(span: &Span) -> SpanArm {
         _ => None,
     });
     if let Some(party) = mention {
-        return SpanArm::Mention(mention_link(party));
+        return SpanArm::Mention(mention_link(party, chain));
     }
     let bold = span.marks.iter().any(|m| matches!(m, Mark::Bold));
     let italic = span.marks.iter().any(|m| matches!(m, Mark::Italic));
@@ -1528,30 +1545,34 @@ fn span_arm(span: &Span) -> SpanArm {
     }
 }
 
-/// `duck://account/<n>` — the address a mention of an account opens (the DM
-/// with that account). A mention that names a bare key addresses no account
-/// the app can open, so it carries no link and draws as a plate alone.
-pub fn duck_account_link(account: u64) -> String {
-    format!("duck://account/{account}")
+/// `duck://<chain>/identity/<account>` — the address a mention of an account
+/// opens (the DM with that account), or "" if no address can be built. A
+/// mention that names a bare key addresses no account the app can open, so it
+/// carries no link and draws as a plate alone.
+pub fn duck_account_link(chain: &ChainId, account: u64) -> String {
+    AccountAddress { account }
+        .address(chain.clone())
+        .map(|address| address.to_string())
+        .unwrap_or_default()
 }
 
-fn mention_link(party: &Party) -> String {
+fn mention_link(party: &Party, chain: &ChainId) -> String {
     match party {
-        Party::Account(account) => duck_account_link(*account),
+        Party::Account(account) => duck_account_link(chain, *account),
         Party::Key(_) | Party::Module(_) | Party::System => String::new(),
     }
 }
 
 /// Inline runs with unpainted thin-space gaps around mention plates.
 /// The paragraph wraps natively without splitting runs into words.
-fn run_spans(spans: &[Span]) -> Vec<ChatSpan> {
+fn run_spans(spans: &[Span], chain: &ChainId) -> Vec<ChatSpan> {
     let mut out = Vec::new();
     for span in spans {
         if span.text.is_empty() {
             continue;
         }
         let mut rendered = ChatSpan::default();
-        match span_arm(span) {
+        match span_arm(span, chain) {
             SpanArm::Link(url) => {
                 rendered.link_text = span.text.clone();
                 rendered.link = url;
@@ -1584,7 +1605,7 @@ fn run_spans(spans: &[Span]) -> Vec<ChatSpan> {
 /// text carries no inline mark, keeping the plain single-`text` render;
 /// multi-line text stays plain because a rendered break is a block boundary,
 /// never a `\n` inside one paragraph.
-pub fn plain_rich_spans(text: &str) -> Vec<ChatSpan> {
+pub fn plain_rich_spans(text: &str, chain: &ChainId) -> Vec<ChatSpan> {
     if text.contains('\n') {
         return Vec::new();
     }
@@ -1593,7 +1614,7 @@ pub fn plain_rich_spans(text: &str) -> Vec<ChatSpan> {
     if !marked {
         return Vec::new();
     }
-    run_spans(&spans)
+    run_spans(&spans, chain)
 }
 
 // ============================================================================
@@ -1709,42 +1730,6 @@ fn count_i64(value: usize) -> i64 {
 // ============================================================================
 // composer parsing — markdown → wire blocks
 // ============================================================================
-
-/// How many hex characters `mint_chain_id` puts after the `#`.
-const CHAIN_DIGEST_HEX: usize = 8;
-
-/// The chain id's hash half — `mint_chain_id` spells a chain id
-/// `<name>#<8 hex>` and only the hex rides a URI. "" for an unnamed chain.
-///
-/// Split from the RIGHT: `node init --name` validates nothing, so a network
-/// named `my#net` mints the chain id `my#net#a1b2c3d4`, and only the LAST `#`
-/// is the minted separator.
-pub fn chain_digest(chain_id: &str) -> &str {
-    chain_id.rsplit_once('#').map(|(_, hex)| hex).unwrap_or("")
-}
-
-/// The `?net=` a produced `duck://` link carries, or "" when the producer has
-/// no chain id. THIS IS THE ONE PLACE THE QUERY IS SPELLED: the app's link
-/// builders (`backend/duck_uri.rs`) and the in-consensus producer
-/// (`runs::inject`) both go through here, so a produced link cannot carry a
-/// second dialect of the half that makes a foreign-network refusal possible.
-/// It lives beside the tokenizer that PARSES the form for the same reason.
-pub fn duck_net_query(chain_id: &str) -> String {
-    let digest = chain_digest(chain_id);
-    match digest.is_empty() {
-        true => String::new(),
-        false => format!("?net={digest}"),
-    }
-}
-
-/// Is `digest` a minted chain-id hash half — exactly [`CHAIN_DIGEST_HEX`]
-/// lowercase hex? The reader's side of [`duck_net_query`].
-pub fn is_chain_digest(digest: &str) -> bool {
-    digest.len() == CHAIN_DIGEST_HEX
-        && digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
 
 /// Autocomplete candidates carry identity separately from their display labels.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1951,9 +1936,25 @@ pub fn validate_channel_namespace(party: &Party, channel_id: &str) -> Result<(),
 mod tests {
     use super::*;
 
+    /// the chain every rendered address in these tests names, in the
+    /// registry's spelling.
+    fn chain() -> ChainId {
+        "dognet#b5b6ea90".parse().expect("a chain id parses")
+    }
+
+    /// the account a rendered mention link names, read back through the one
+    /// parser and identity's typed tail.
+    fn linked_account(link: &str) -> u64 {
+        let address = duck_address::Address::parse(link).expect("a duck:// address");
+        AccountAddress::try_from(&address)
+            .expect("an account address")
+            .account
+    }
+
     /// A mention of an account is a destination the reader can open — its
-    /// span carries `duck://account/<n>` beside the plate text; a mention of
-    /// a bare key names no account the app can open and carries no link.
+    /// span carries `duck://<chain>/identity/<account>` beside the plate
+    /// text; a mention of a bare key names no account the app can open and
+    /// carries no link.
     #[test]
     fn a_mention_of_an_account_carries_its_duck_link() {
         let spans = vec![
@@ -1966,9 +1967,13 @@ mod tests {
                 marks: vec![Mark::Mention(Party::Key(vec![0xa1, 0xb2]))],
             },
         ];
-        let rendered = run_spans(&spans);
+        let rendered = run_spans(&spans, &chain());
         assert_eq!(rendered[1].mention, "@zoe");
-        assert_eq!(rendered[1].mention_link, "duck://account/7");
+        assert_eq!(
+            rendered[1].mention_link,
+            "duck://dognet-b5b6ea90/identity/7"
+        );
+        assert_eq!(linked_account(&rendered[1].mention_link), 7);
         assert_eq!(rendered[4].mention, "@a1b2");
         assert_eq!(rendered[4].mention_link, "");
     }
@@ -2203,8 +2208,8 @@ mod tests {
             reactions,
             tags: Vec::new(),
         };
-        let plain = chat_message(row(Vec::new()), ChatReader::nobody());
-        let identical = chat_message(row(Vec::new()), ChatReader::nobody());
+        let plain = chat_message(row(Vec::new()), ChatReader::nobody(), &chain());
+        let identical = chat_message(row(Vec::new()), ChatReader::nobody(), &chain());
         assert_eq!(
             plain.render_rev, identical.render_rev,
             "identical content seeds identically — the cached subtree is kept"
@@ -2215,6 +2220,7 @@ mod tests {
                 reactors: vec!["user:cd".into()],
             }]),
             ChatReader::nobody(),
+            &chain(),
         );
         assert_ne!(
             plain.render_rev, reacted.render_rev,
@@ -2231,12 +2237,14 @@ mod tests {
             "hello".into(),
             "op1".into(),
             ChatReader::nobody(),
+            &chain(),
         );
         let re_minted = optimistic_message(
             Vec::new(),
             "hello".into(),
             "op1".into(),
             ChatReader::nobody(),
+            &chain(),
         );
         assert_eq!(minted[0].render_rev, re_minted[0].render_rev);
         let other = optimistic_message(
@@ -2244,6 +2252,7 @@ mod tests {
             "hello".into(),
             "op2".into(),
             ChatReader::nobody(),
+            &chain(),
         );
         assert_ne!(minted[0].render_rev, other[0].render_rev);
     }
@@ -2392,6 +2401,7 @@ mod tests {
             "external",
             Some("ext:ab"),
             ChatReader::nobody(),
+            &chain(),
             276_199,
         )
         .expect("a well-formed op folds")
@@ -2469,7 +2479,7 @@ mod tests {
 
         // round-trips into the flattened body + render model
         assert!(message_body(&blocks).contains("Hello world and friends"));
-        let view = blocks_view(&blocks);
+        let view = blocks_view(&blocks, &chain());
         assert_eq!(view[0].kind, "paragraph");
         assert!(view[0].rich, "formatted paragraph renders as spans");
         assert!(view[0].spans.iter().any(|span| span.bold == "world"));
@@ -2477,7 +2487,7 @@ mod tests {
         assert_eq!(view[3].text, "fn main() {}");
 
         // a plain message stays a single non-rich paragraph
-        let plain = blocks_view(&parse_message("just text here"));
+        let plain = blocks_view(&parse_message("just text here"), &chain());
         assert_eq!(plain.len(), 1);
         assert!(!plain[0].rich);
         assert_eq!(plain[0].text, "just text here");
@@ -2489,22 +2499,30 @@ mod tests {
     /// is unreachable from chat — the protocol's whole last mile.
     #[test]
     fn a_duck_reference_and_a_bare_duck_url_both_become_one_link_span() {
-        let Block::Paragraph(spans) = &parse_message("[x](duck://page/p1)")[0] else {
+        let Block::Paragraph(spans) = &parse_message("[x](duck://dognet-b5b6ea90/pages/p1)")[0]
+        else {
             panic!("a paragraph");
         };
         assert_eq!(spans.len(), 1, "label and target are one span: {spans:?}");
         assert_eq!(spans[0].text, "x");
-        assert_eq!(spans[0].marks, vec![Mark::Link("duck://page/p1".into())]);
+        assert_eq!(
+            spans[0].marks,
+            vec![Mark::Link("duck://dognet-b5b6ea90/pages/p1".into())]
+        );
 
-        let Block::Paragraph(bare) = &parse_message("duck://forge/r/1")[0] else {
+        let Block::Paragraph(bare) = &parse_message("duck://dognet-b5b6ea90/forge/r/1")[0] else {
             panic!("a paragraph");
         };
         assert_eq!(bare.len(), 1);
-        assert_eq!(bare[0].text, "duck://forge/r/1");
-        assert_eq!(bare[0].marks, vec![Mark::Link("duck://forge/r/1".into())]);
+        assert_eq!(bare[0].text, "duck://dognet-b5b6ea90/forge/r/1");
+        assert_eq!(
+            bare[0].marks,
+            vec![Mark::Link("duck://dognet-b5b6ea90/forge/r/1".into())]
+        );
 
-        // a produced link carries its network, and the query rides along
-        let Block::Paragraph(net) = &parse_message("see [58](duck://forge/d/58?net=d0cdf950)")[0]
+        // a produced link carries its network in its authority
+        let Block::Paragraph(net) =
+            &parse_message("see [58](duck://dognet-b5b6ea90/forge/d/58)")[0]
         else {
             panic!("a paragraph");
         };
@@ -2512,7 +2530,7 @@ mod tests {
         assert_eq!(net[1].text, "58");
         assert_eq!(
             net[1].marks,
-            vec![Mark::Link("duck://forge/d/58?net=d0cdf950".into())]
+            vec![Mark::Link("duck://dognet-b5b6ea90/forge/d/58".into())]
         );
 
         // not references, and not links either: an unknown scheme in the
@@ -2536,15 +2554,20 @@ mod tests {
 
         // an empty label is no reference — the bare target inside is still a
         // link, labelled by itself, and the prose's `)` is not part of it.
-        let Block::Paragraph(unlabelled) = &parse_message("[](duck://page/p1)")[0] else {
+        let Block::Paragraph(unlabelled) = &parse_message("[](duck://dognet-b5b6ea90/pages/p1)")[0]
+        else {
             panic!("a paragraph");
         };
         let link = unlabelled
             .iter()
             .find(|span| matches!(span.marks.first(), Some(Mark::Link(_))))
             .expect("a link span");
-        assert_eq!(link.text, "duck://page/p1");
-        assert_eq!(span_text(unlabelled), "[](duck://page/p1)", "no text lost");
+        assert_eq!(link.text, "duck://dognet-b5b6ea90/pages/p1");
+        assert_eq!(
+            span_text(unlabelled),
+            "[](duck://dognet-b5b6ea90/pages/p1)",
+            "no text lost"
+        );
 
         // a `)` the address itself opened stays in it.
         let Block::Paragraph(balanced) = &parse_message("https://x/Foo_(bar)")[0] else {
@@ -2577,7 +2600,7 @@ mod tests {
         // not have been fixed for on the render side.
         let marked = parse_message("**ship it**\nhttps://ducktape.example");
         assert_eq!(marked.len(), 2);
-        let view = blocks_view(&marked);
+        let view = blocks_view(&marked, &chain());
         assert!(view[0].rich && view[1].rich);
 
         // And the edit draft the reader gets back is the text she typed, not
@@ -2624,10 +2647,14 @@ mod tests {
                 text: "<@3>".into(),
             },
         ];
-        let view = blocks_view_with_names(&blocks, &names);
+        let view = blocks_view_with_names(&blocks, &names, &chain());
         assert_eq!(view[0].spans[0].plain, "before ");
         assert_eq!(view[0].spans[2].mention, "@Selfhost Duck");
-        assert_eq!(view[0].spans[2].mention_link, "duck://account/3");
+        assert_eq!(
+            view[0].spans[2].mention_link,
+            "duck://dognet-b5b6ea90/identity/3"
+        );
+        assert_eq!(linked_account(&view[0].spans[2].mention_link), 3);
         assert_eq!(view[0].spans[4].plain, " yoyo");
         assert_eq!(view[0].spans[1].plain, "\u{2009}");
         assert_eq!(view[0].spans[3].plain, "\u{2009}");
@@ -2654,13 +2681,17 @@ mod tests {
         assert_eq!(mention_parties(&blocks), vec![Party::Account(2)]);
         assert_eq!(draft_body(&blocks), text);
         assert_eq!(parse_message(&draft_body(&blocks)), blocks);
-        let view = blocks_view_with_names(&blocks, &names);
+        let view = blocks_view_with_names(&blocks, &names, &chain());
         assert_eq!(view[0].spans[2].mention, "@Selfhost Duck");
-        assert_eq!(view[0].spans[2].mention_link, "duck://account/2");
+        assert_eq!(
+            view[0].spans[2].mention_link,
+            "duck://dognet-b5b6ea90/identity/2"
+        );
+        assert_eq!(linked_account(&view[0].spans[2].mention_link), 2);
         let renamed = account(2, "Claude Peer", Vec::new());
         let names = NameDirectory::from_accounts([&renamed]);
         assert_eq!(
-            blocks_view_with_names(&blocks, &names)[0].spans[2].mention,
+            blocks_view_with_names(&blocks, &names, &chain())[0].spans[2].mention,
             "@Claude Peer"
         );
         assert_eq!(draft_body(&blocks), text);
@@ -2823,7 +2854,7 @@ mod tests {
 
     #[test]
     fn plain_rich_spans_mark_inline_runs_and_stay_empty_for_plain_text() {
-        let spans = plain_rich_spans("say **hi** to https://duck.example/x");
+        let spans = plain_rich_spans("say **hi** to https://duck.example/x", &chain());
         let bold: Vec<_> = spans.iter().filter(|span| !span.bold.is_empty()).collect();
         assert_eq!(bold.len(), 1);
         assert_eq!(bold[0].bold, "hi");
@@ -2854,7 +2885,7 @@ mod tests {
             .collect();
         assert_eq!(rendered, "say hi to https://duck.example/x");
 
-        assert!(plain_rich_spans("no marks here").is_empty());
-        assert!(plain_rich_spans("**multi**\nline").is_empty());
+        assert!(plain_rich_spans("no marks here", &chain()).is_empty());
+        assert!(plain_rich_spans("**multi**\nline", &chain()).is_empty());
     }
 }

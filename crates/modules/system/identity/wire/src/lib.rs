@@ -34,6 +34,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
+pub use duck_address::identity::AccountAddress;
 pub use keyscheme::KeyScheme;
 pub use sdk::AccountNumber;
 use sdk::ModuleId;
