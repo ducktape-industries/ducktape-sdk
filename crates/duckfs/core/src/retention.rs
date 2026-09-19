@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::codec::push_string;
 use crate::objects::{EntryKind, FileObj, Kind, ObjectId, TreeEntry, object_id};
+use crate::refusal::FsRefusal;
 use crate::tree::{Store, TreeEdit};
 use crate::{
     MAX_PIN_NAME_BYTES, MAX_WATCH_MODULE_ID_BYTES, RetentionReference, from_hex_32, to_hex,
@@ -54,17 +55,19 @@ impl Record {
     }
 }
 
-pub(crate) fn decode_record(body: &[u8]) -> Result<Record, String> {
-    let file = FileObj::decode(body)?;
+pub(crate) fn decode_record(body: &[u8]) -> Result<Record, FsRefusal> {
+    // every refusal below is about bytes already in the store, so they are all
+    // `Corrupt`: no request can be fixed to make a stored record decode.
+    let file = FileObj::decode(body).map_err(FsRefusal::Corrupt)?;
     let valid_shape = file.size == 0 && file.chunks.is_empty() && file.meta.len() == 2;
     if !valid_shape {
-        return Err("invalid retention record shape".into());
+        return Err(FsRefusal::Corrupt("invalid retention record shape".into()));
     }
     let snapshot = file
         .meta
         .get("snapshot")
-        .ok_or_else(|| "retention record has no snapshot".to_string())?;
-    let id = snapshot_id(snapshot)?;
+        .ok_or_else(|| FsRefusal::Corrupt("retention record has no snapshot".into()))?;
+    let id = snapshot_id(snapshot).map_err(FsRefusal::Corrupt)?;
     if let Some(revision) = file.meta.get("revision") {
         return Ok(Record::Reference(RetentionReference {
             snapshot: snapshot.clone(),
@@ -74,24 +77,26 @@ pub(crate) fn decode_record(body: &[u8]) -> Result<Record, String> {
     let count = file
         .meta
         .get("count")
-        .ok_or_else(|| "retention record has no count".to_string())?;
+        .ok_or_else(|| FsRefusal::Corrupt("retention record has no count".into()))?;
     Ok(Record::Membership {
         snapshot: id,
         count: positive_number(count)?,
     })
 }
 
-fn positive_number(value: &str) -> Result<u64, String> {
-    let number = value
-        .parse::<u64>()
-        .map_err(|_| "invalid retention number".to_string())?;
+/// only ever reads a stored record, so a bad number is corruption.
+fn positive_number(value: &str) -> Result<u64, FsRefusal> {
+    let invalid = || FsRefusal::Corrupt("invalid retention number".into());
+    let number = value.parse::<u64>().map_err(|_| invalid())?;
     let canonical = number != 0 && number.to_string() == value;
     if !canonical {
-        return Err("invalid retention number".into());
+        return Err(invalid());
     }
     Ok(number)
 }
 
+/// shared by a stored edge and a caller-supplied reference, so the class stays
+/// with the call site: the sentence is the same, the recovery is not.
 pub(crate) fn snapshot_id(snapshot: &str) -> Result<ObjectId, String> {
     let id = from_hex_32(snapshot).ok_or_else(|| "invalid retention snapshot".to_string())?;
     if to_hex(&id) != snapshot {
@@ -100,11 +105,13 @@ pub(crate) fn snapshot_id(snapshot: &str) -> Result<ObjectId, String> {
     Ok(id)
 }
 
-fn validate_name(module: &str, key: &str) -> Result<(), String> {
+fn validate_name(module: &str, key: &str) -> Result<(), FsRefusal> {
     let valid_module = !module.is_empty() && module.len() <= MAX_WATCH_MODULE_ID_BYTES;
     let valid_key = !key.is_empty() && key.len() <= MAX_PIN_NAME_BYTES;
     if !valid_module || !valid_key {
-        return Err("invalid retention module or key".into());
+        return Err(FsRefusal::InvalidRequest {
+            why: "invalid retention module or key".into(),
+        });
     }
     Ok(())
 }
@@ -130,19 +137,19 @@ fn get_record(
     store: &Store,
     root: Option<ObjectId>,
     path: &[String],
-) -> Result<Option<Record>, String> {
+) -> Result<Option<Record>, FsRefusal> {
     let edit = TreeEdit::load(store, root);
     let Some(entry) = edit.get(store, path)? else {
         return Ok(None);
     };
     if entry.kind != EntryKind::File {
-        return Err("retention record is not a file".into());
+        return Err(FsRefusal::Corrupt("retention record is not a file".into()));
     }
     let Some((kind, body)) = store.get(&entry.id)? else {
-        return Err("retention record missing".into());
+        return Err(FsRefusal::Corrupt("retention record missing".into()));
     };
     if kind != Kind::File {
-        return Err("retention record kind mismatch".into());
+        return Err(FsRefusal::Corrupt("retention record kind mismatch".into()));
     }
     decode_record(&body).map(Some)
 }
@@ -152,25 +159,31 @@ pub(crate) fn get(
     root: Option<ObjectId>,
     module: &str,
     key: &str,
-) -> Result<Option<RetentionReference>, String> {
+) -> Result<Option<RetentionReference>, FsRefusal> {
     validate_name(module, key)?;
     match get_record(store, root, &reference_path(module, key))? {
         None => Ok(None),
         Some(Record::Reference(reference)) => Ok(Some(reference)),
-        Some(Record::Membership { .. }) => Err("invalid retention reference edge".into()),
+        Some(Record::Membership { .. }) => Err(FsRefusal::Corrupt(
+            "invalid retention reference edge".into(),
+        )),
     }
 }
 
-fn count(store: &Store, root: Option<ObjectId>, id: &ObjectId) -> Result<u64, String> {
+fn count(store: &Store, root: Option<ObjectId>, id: &ObjectId) -> Result<u64, FsRefusal> {
     match get_record(store, root, &membership_path(id))? {
         None => Ok(0),
         Some(Record::Membership { snapshot, count }) => {
             if snapshot != *id {
-                return Err("retention membership snapshot mismatch".into());
+                return Err(FsRefusal::Corrupt(
+                    "retention membership snapshot mismatch".into(),
+                ));
             }
             Ok(count)
         }
-        Some(Record::Reference(_)) => Err("invalid retention membership edge".into()),
+        Some(Record::Reference(_)) => Err(FsRefusal::Corrupt(
+            "invalid retention membership edge".into(),
+        )),
     }
 }
 
@@ -178,7 +191,7 @@ pub(crate) fn contains(
     store: &Store,
     root: Option<ObjectId>,
     id: &ObjectId,
-) -> Result<bool, String> {
+) -> Result<bool, FsRefusal> {
     Ok(count(store, root, id)? != 0)
 }
 
@@ -188,7 +201,7 @@ fn put(
     path: &[String],
     record: Record,
     objects: &mut Vec<(Kind, Vec<u8>)>,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     let body = record.file().encode();
     let id = object_id(Kind::File, &body);
     edit.put(
@@ -207,12 +220,12 @@ fn put(
 
 /// Empty catalog ancestors are not user directories. Remove the exhausted
 /// spine as well, so pruning an archive does not leave permanent index nodes.
-fn remove(edit: &mut TreeEdit, store: &Store, path: &[String]) -> Result<(), String> {
+fn remove(edit: &mut TreeEdit, store: &Store, path: &[String]) -> Result<(), FsRefusal> {
     edit.rm(store, path)?;
     for depth in (1..path.len()).rev() {
         let parent = &path[..depth];
         let Some(entry) = edit.get(store, parent)? else {
-            return Err("retention ancestor missing".into());
+            return Err(FsRefusal::Corrupt("retention ancestor missing".into()));
         };
         let empty_directory = entry.kind == EntryKind::Dir && entry.size == 0;
         if !empty_directory {
@@ -237,17 +250,23 @@ pub(crate) fn compare_exchange(
     key: &str,
     expected: Option<&RetentionReference>,
     replacement: Option<&RetentionReference>,
-) -> Result<Built, String> {
+) -> Result<Built, FsRefusal> {
     validate_name(module, key)?;
     for reference in [expected, replacement].into_iter().flatten() {
-        snapshot_id(&reference.snapshot)?;
+        // the caller supplied these two references, so a malformed one is the
+        // request's fault, unlike the same sentence raised from a stored edge.
+        snapshot_id(&reference.snapshot).map_err(|why| FsRefusal::InvalidRequest { why })?;
         if reference.revision == 0 {
-            return Err("retention revision must be nonzero".into());
+            return Err(FsRefusal::InvalidRequest {
+                why: "retention revision must be nonzero".into(),
+            });
         }
     }
     let current = get(store, root, module, key)?;
     if current.as_ref() != expected {
-        return Err("retention compare exchange mismatch".into());
+        return Err(FsRefusal::InvalidRequest {
+            why: "retention compare exchange mismatch".into(),
+        });
     }
     if expected == replacement {
         return Ok(Built {
@@ -259,7 +278,9 @@ pub(crate) fn compare_exchange(
         .zip(replacement)
         .is_some_and(|(old, new)| new.revision <= old.revision);
     if revision_regressed {
-        return Err("retention revision must advance".into());
+        return Err(FsRefusal::InvalidRequest {
+            why: "retention revision must advance".into(),
+        });
     }
     let mut edit = TreeEdit::load(store, root);
     let mut objects = Vec::new();
@@ -274,13 +295,14 @@ pub(crate) fn compare_exchange(
         )?,
         None => remove(&mut edit, store, &path)?,
     }
-    let previous = expected.map(|r| snapshot_id(&r.snapshot)).transpose()?;
-    let next = replacement.map(|r| snapshot_id(&r.snapshot)).transpose()?;
+    // both were checked above, so these cannot refuse.
+    let previous = expected.map(|r| snapshot_id(&r.snapshot).expect("checked reference"));
+    let next = replacement.map(|r| snapshot_id(&r.snapshot).expect("checked reference"));
     if previous != next {
         if let Some(id) = previous {
             let remaining = count(store, root, &id)?
                 .checked_sub(1)
-                .ok_or_else(|| "retention membership underflow".to_string())?;
+                .ok_or_else(|| FsRefusal::Corrupt("retention membership underflow".into()))?;
             let path = membership_path(&id);
             if remaining == 0 {
                 remove(&mut edit, store, &path)?;
@@ -300,7 +322,7 @@ pub(crate) fn compare_exchange(
         if let Some(id) = next {
             let added = count(store, root, &id)?
                 .checked_add(1)
-                .ok_or_else(|| "retention membership overflow".to_string())?;
+                .ok_or_else(|| FsRefusal::Corrupt("retention membership overflow".into()))?;
             put(
                 &mut edit,
                 store,

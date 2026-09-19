@@ -13,7 +13,8 @@ use crate::objects::{
     EntryKind, FileObj, Kind, ObjectId, SnapshotObj, TreeEntry, TreeObj, object_id,
     verify_chunk_len_at, verify_file_shape,
 };
-use crate::paths::{canonical, check_authority};
+use crate::paths::{canonical, check_authority, join_segs};
+use crate::refusal::FsRefusal;
 use crate::state::{
     PinEntry, Refs, Staged, decode_refs, encode_refs, encoded_refs_len, pin_entry_len, root_bytes,
     staged_entry_len, watch_entry_len,
@@ -153,6 +154,35 @@ impl Notification {
 pub(crate) fn sweep_expired(refs: &mut Refs, height: u64) {
     refs.staging
         .retain(|_digest, staged| staged.expires_at > height);
+}
+
+/// the two refusals [`Fs::transact`] itself can raise, in whichever error type
+/// the verb answers with. `commit` carries [`FsRefusal`]; the verbs that still
+/// answer with a sentence carry `String`, and their wording is unchanged
+/// because a `FsRefusal`'s `Display` IS its sentence.
+pub(crate) trait TransactRefusal {
+    /// the authority is malformed, so it may not act at all.
+    fn authority(why: String) -> Self;
+    /// the source revision counter cannot advance again.
+    fn revision_exhausted() -> Self;
+}
+
+impl TransactRefusal for String {
+    fn authority(why: String) -> Self {
+        why
+    }
+    fn revision_exhausted() -> Self {
+        "source revision exhausted".into()
+    }
+}
+
+impl TransactRefusal for FsRefusal {
+    fn authority(why: String) -> Self {
+        FsRefusal::Unauthorized { why }
+    }
+    fn revision_exhausted() -> Self {
+        FsRefusal::RevisionExhausted
+    }
 }
 
 impl<S: ObjectStore> Fs<S> {
@@ -333,19 +363,19 @@ impl<S: ObjectStore> Fs<S> {
     /// Apply one verb atomically to the pending refs. A refused verb preserves
     /// earlier operations in this block, including expired staging entries.
     /// Objects are appended only after each verb's last fallible check.
-    fn transact<T>(
+    fn transact<T, E: TransactRefusal>(
         &mut self,
         authority: &Authority,
         height: u64,
-        operation: impl FnOnce(&mut Self) -> Result<T, String>,
-    ) -> Result<T, String> {
-        authority.validate()?;
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        authority.validate().map_err(E::authority)?;
         self.require_pending(height);
         let before = self.pending_refs().clone();
         let next_revision = before
             .source_revision
             .checked_add(1)
-            .ok_or_else(|| "source revision exhausted".to_string())?;
+            .ok_or_else(E::revision_exhausted)?;
         match operation(self) {
             Ok(output) => {
                 let pending = self.pending.as_mut().expect("require_pending set it");
@@ -380,7 +410,7 @@ impl<S: ObjectStore> Fs<S> {
         base: Option<String>,
         message: String,
         changes: Vec<Change>,
-    ) -> Result<Vec<Notification>, String> {
+    ) -> Result<Vec<Notification>, FsRefusal> {
         self.transact(authority, height, |fs| {
             fs.commit_apply(authority, height, time, base, message, changes)
         })
@@ -576,7 +606,7 @@ impl<S: ObjectStore> Fs<S> {
         base: Option<String>,
         message: String,
         changes: Vec<Change>,
-    ) -> Result<Vec<Notification>, String> {
+    ) -> Result<Vec<Notification>, FsRefusal> {
         self.require_pending(height);
         // read the plain Copy caps before borrowing pending — commit_apply needs
         // the window cap, and the object-read budget needs its ceiling.
@@ -647,19 +677,22 @@ impl<S: ObjectStore> Fs<S> {
             pending: &pending.objects,
             budget: Some(&budget),
         };
-        if !refs_contains_snapshot(&pending.refs, &store, &id)? {
+        if !refs_contains_snapshot(&pending.refs, &store, &id).map_err(|e| e.to_string())? {
             return Err("snapshot not resolvable".into());
         }
-        let source_root = snapshot_root_tree(&store, &id)?;
+        let source_root = snapshot_root_tree(&store, &id).map_err(|e| e.to_string())?;
         let mut objects = Vec::new();
         let root = if segments.is_empty() {
             source_root
         } else {
-            let entry = entry_at(&store, Some(source_root), &segments)?
+            let entry = entry_at(&store, Some(source_root), &segments)
+                .map_err(|e| e.to_string())?
                 .ok_or_else(|| "projection path not found".to_string())?;
             let mut edit = TreeEdit::load(&store, None);
-            edit.put(&store, &segments, entry)?;
-            edit.build(&mut objects)?
+            edit.put(&store, &segments, entry)
+                .map_err(|e| e.to_string())?;
+            edit.build(&mut objects)
+                .map_err(|e| e.to_string())?
                 .expect("projected entry makes a tree")
         };
         let body = SnapshotObj {
@@ -708,7 +741,7 @@ impl<S: ObjectStore> Fs<S> {
         };
         if let Some(reference) = &replacement {
             let id = crate::retention::snapshot_id(&reference.snapshot)?;
-            if !refs_contains_snapshot(&pending.refs, &store, &id)? {
+            if !refs_contains_snapshot(&pending.refs, &store, &id).map_err(|e| e.to_string())? {
                 return Err("retention snapshot not resolvable".into());
             }
         }
@@ -719,7 +752,8 @@ impl<S: ObjectStore> Fs<S> {
             &key,
             expected.as_ref(),
             replacement.as_ref(),
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
         let pending = self.pending.as_mut().expect("transact sets pending");
         sweep_expired(&mut pending.refs, height);
         pending.refs.retention_root = built.root;
@@ -787,7 +821,7 @@ impl<S: ObjectStore> Fs<S> {
             pending: &pending.objects,
             budget: Some(&budget),
         };
-        if !refs_contains_snapshot(&pending.refs, &store, &id)? {
+        if !refs_contains_snapshot(&pending.refs, &store, &id).map_err(|e| e.to_string())? {
             return Err("snapshot not resolvable".into());
         }
         refuse_refs_growth(
@@ -965,7 +999,7 @@ impl<S: ObjectStore> Fs<S> {
 
     /// committed state only — never the pending overlay. delegates to the pure
     /// read side in `queries.rs`.
-    pub fn query(&self, q: FilesQuery) -> Result<FilesReply, String> {
+    pub fn query(&self, q: FilesQuery) -> Result<FilesReply, FsRefusal> {
         crate::queries::query(self, q)
     }
 
@@ -1165,7 +1199,7 @@ pub(crate) fn refs_contains_snapshot(
     refs: &Refs,
     store: &Store,
     id: &ObjectId,
-) -> Result<bool, String> {
+) -> Result<bool, FsRefusal> {
     let ordinary = refs.head.as_ref() == Some(id)
         || refs.window.contains(id)
         || refs.pins.values().any(|p| &p.snapshot == id);
@@ -1209,7 +1243,7 @@ fn commit_apply(
     message: String,
     changes: &[Change],
     window_cap: usize,
-) -> Result<CommitBuilt, String> {
+) -> Result<CommitBuilt, FsRefusal> {
     // step 0: the deterministic staging sweep, over the scratch. a reject never
     // persists a half-applied sweep — the scratch view is discarded on failure, and an
     // idempotent later op re-sweeps if the block continues.
@@ -1217,13 +1251,19 @@ fn commit_apply(
 
     // step 1: message + change-count bounds.
     if message.len() > MAX_MESSAGE_BYTES {
-        return Err("commit message exceeds the byte cap".into());
+        return Err(FsRefusal::Capacity {
+            what: "commit message exceeds the byte cap".into(),
+        });
     }
     if changes.is_empty() {
-        return Err("commit must carry at least one change".into());
+        return Err(FsRefusal::InvalidRequest {
+            why: "commit must carry at least one change".into(),
+        });
     }
     if changes.len() > MAX_CHANGES_PER_COMMIT {
-        return Err("commit exceeds the change cap".into());
+        return Err(FsRefusal::Capacity {
+            what: "commit exceeds the change cap".into(),
+        });
     }
 
     // step 2: resolve base -> its root tree. None = the empty tree (first commit /
@@ -1232,9 +1272,12 @@ fn commit_apply(
     let base_root: Option<ObjectId> = match &base {
         None => None,
         Some(hex) => {
-            let id = from_hex_32(hex).ok_or_else(|| "base snapshot not resolvable".to_string())?;
+            // unparseable and unreachable are one refusal to the caller: the
+            // base it named is not a snapshot it can commit onto.
+            let unresolvable = || FsRefusal::BaseUnresolvable { base: hex.clone() };
+            let id = from_hex_32(hex).ok_or_else(unresolvable)?;
             if !refs_contains_snapshot(&refs, store, &id)? {
-                return Err("base snapshot not resolvable".into());
+                return Err(unresolvable());
             }
             Some(snapshot_root_tree(store, &id)?)
         }
@@ -1279,14 +1322,20 @@ fn commit_apply(
                 let (fileobj_id, chunk_ids, size) = match content {
                     Content::Inline { b64 } => {
                         // step 5: strict base64, budget-summed.
-                        let bytes = STANDARD
-                            .decode(b64.as_bytes())
-                            .map_err(|_| "inline content is not valid base64".to_string())?;
-                        inline_bytes = inline_bytes
-                            .checked_add(bytes.len())
-                            .ok_or_else(|| "inline commit budget overflows".to_string())?;
+                        let bytes = STANDARD.decode(b64.as_bytes()).map_err(|_| {
+                            FsRefusal::InvalidRequest {
+                                why: "inline content is not valid base64".into(),
+                            }
+                        })?;
+                        inline_bytes = inline_bytes.checked_add(bytes.len()).ok_or_else(|| {
+                            FsRefusal::Capacity {
+                                what: "inline commit budget overflows".into(),
+                            }
+                        })?;
                         if inline_bytes > MAX_INLINE_COMMIT_BYTES {
-                            return Err("inline commit budget exceeded".into());
+                            return Err(FsRefusal::Capacity {
+                                what: "inline commit budget exceeded".into(),
+                            });
                         }
                         let chunk_ids =
                             chunk_bytes(&bytes, store, pending_ids, &mut objects, &mut staged_ids)?;
@@ -1366,7 +1415,9 @@ fn commit_apply(
                 let joined = join_segs(&segs);
                 dedup(&mut seen, &joined)?;
                 if target.len() > MAX_SYMLINK_TARGET_BYTES {
-                    return Err("symlink target exceeds the byte cap".into());
+                    return Err(FsRefusal::Capacity {
+                        what: "symlink target exceeds the byte cap".into(),
+                    });
                 }
                 // one chunk holds the target bytes; the FileObj points at it with
                 // the symlink's entry kind and size = target length.
@@ -1423,8 +1474,12 @@ fn commit_apply(
     for (size, ids) in &chunks_to_check {
         for (index, id) in ids.iter().enumerate() {
             let got = chunk_stat(id, &refs, pending_ids, &staged_ids)?
-                .ok_or_else(|| "chunk not available".to_string())?;
-            verify_chunk_len_at(*size, ids.len(), index, got)?;
+                .ok_or_else(|| FsRefusal::ChunkUnavailable { chunk: to_hex(id) })?;
+            // the commit supplied both the declared size and the digest list, so
+            // a length that contradicts them is the request's fault, not the
+            // store's.
+            verify_chunk_len_at(*size, ids.len(), index, got)
+                .map_err(|why| FsRefusal::InvalidRequest { why })?;
         }
     }
 
@@ -1433,7 +1488,9 @@ fn commit_apply(
     // concurrent change moved it since base — reject the whole commit.
     for (joined, segs) in &touched {
         if entry_at(store, base_root, segs)? != entry_at(store, effective_root, segs)? {
-            return Err(format!("conflict: {joined} changed since base"));
+            return Err(FsRefusal::CommitConflict {
+                path: joined.clone(),
+            });
         }
     }
 
@@ -1538,14 +1595,16 @@ fn chunk_stat(
     refs: &Refs,
     pending_ids: &BTreeMap<ObjectId, (Kind, u64)>,
     staged_ids: &BTreeMap<ObjectId, (Kind, u64)>,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, FsRefusal> {
     // staging entries are chunks by construction (putblob stages only chunks).
     if let Some(staged) = refs.staging.get(id) {
         return Ok(Some(staged.len));
     }
     if let Some((kind, len)) = pending_ids.get(id).or_else(|| staged_ids.get(id)) {
         if *kind != Kind::Chunk {
-            return Err("referenced digest is not a chunk".into());
+            return Err(FsRefusal::InvalidRequest {
+                why: "referenced digest is not a chunk".into(),
+            });
         }
         return Ok(Some(*len));
     }
@@ -1553,15 +1612,16 @@ fn chunk_stat(
 }
 
 /// canonicalize a written path and authority-check it for `actor`.
-fn canon_authorized(authority: &Authority, path: &str) -> Result<Vec<String>, String> {
-    let segs = canonical(path)?;
-    check_authority(authority, &segs)?;
+fn canon_authorized(authority: &Authority, path: &str) -> Result<Vec<String>, FsRefusal> {
+    // the class is a fact about WHICH rule refused, so each is classed here
+    // rather than guessed later from the sentence: `canonical` refuses a static
+    // path rule, `check_authority` refuses the actor.
+    let segs = canonical(path).map_err(|why| FsRefusal::InvalidPath {
+        path: path.to_string(),
+        why,
+    })?;
+    check_authority(authority, &segs).map_err(|why| FsRefusal::Unauthorized { why })?;
     Ok(segs)
-}
-
-/// the canonical joined form of a path's segments — the CAS/dedup/watch key.
-fn join_segs(segs: &[String]) -> String {
-    format!("/{}", segs.join("/"))
 }
 
 /// the refs image byte cap ([`MAX_REFS_IMAGE_BYTES`]) gates EVERY growth path
@@ -1638,25 +1698,33 @@ fn watch_matches(prefix: &str, path: &str) -> bool {
 
 /// record a touched path for dedup; a second touch of the same path rejects
 /// (order-independence for CAS and apply). Mv touches two paths.
-fn dedup(seen: &mut BTreeSet<String>, joined: &str) -> Result<(), String> {
+fn dedup(seen: &mut BTreeSet<String>, joined: &str) -> Result<(), FsRefusal> {
     if !seen.insert(joined.to_string()) {
-        return Err("duplicate path in commit".into());
+        return Err(FsRefusal::InvalidRequest {
+            why: "duplicate path in commit".into(),
+        });
     }
     Ok(())
 }
 
 /// enforce the meta caps BEFORE any object is staged — reject, never truncate
 /// (the objects codec would also reject at decode, but we fail early and loudly).
-fn validate_meta(meta: &BTreeMap<String, String>) -> Result<(), String> {
+fn validate_meta(meta: &BTreeMap<String, String>) -> Result<(), FsRefusal> {
     if meta.len() > MAX_META_ENTRIES {
-        return Err("commit meta entry count over cap".into());
+        return Err(FsRefusal::Capacity {
+            what: "commit meta entry count over cap".into(),
+        });
     }
     for (key, value) in meta {
         if key.len() > MAX_META_KEY_BYTES {
-            return Err("commit meta key over cap".into());
+            return Err(FsRefusal::Capacity {
+                what: "commit meta key over cap".into(),
+            });
         }
         if value.len() > MAX_META_VALUE_BYTES {
-            return Err("commit meta value over cap".into());
+            return Err(FsRefusal::Capacity {
+                what: "commit meta value over cap".into(),
+            });
         }
     }
     Ok(())
@@ -1666,16 +1734,24 @@ fn validate_meta(meta: &BTreeMap<String, String>) -> Result<(), String> {
 /// requires an EMPTY chunk list (empty files are legal in duckfs); otherwise the
 /// list length is pinned to ceil(size / CHUNK_SIZE) by checked span bounds
 /// `(n-1)*CHUNK_SIZE < size <= n*CHUNK_SIZE`.
-fn validate_chunks(size: u64, chunks: &[String]) -> Result<Vec<ObjectId>, String> {
+fn validate_chunks(size: u64, chunks: &[String]) -> Result<Vec<ObjectId>, FsRefusal> {
     if chunks.len() > MAX_CHUNKS_PER_FILE {
-        return Err("file chunk count over cap".into());
+        return Err(FsRefusal::Capacity {
+            what: "file chunk count over cap".into(),
+        });
     }
     // the size/chunk-count invariant is shared with sync ingest, so it lives in
-    // one place ([`verify_file_shape`]) rather than being duplicated here.
-    verify_file_shape(size, chunks.len())?;
+    // one place ([`verify_file_shape`]) rather than being duplicated here. on
+    // THIS path both numbers came from the request, so a mismatch is invalid
+    // input rather than a corrupt stored file.
+    verify_file_shape(size, chunks.len()).map_err(|why| FsRefusal::InvalidRequest { why })?;
     chunks
         .iter()
-        .map(|hex| from_hex_32(hex).ok_or_else(|| "chunk digest is not valid hex".to_string()))
+        .map(|hex| {
+            from_hex_32(hex).ok_or_else(|| FsRefusal::InvalidRequest {
+                why: "chunk digest is not valid hex".into(),
+            })
+        })
         .collect()
 }
 
@@ -1688,7 +1764,7 @@ fn chunk_bytes(
     pending_ids: &BTreeMap<ObjectId, (Kind, u64)>,
     objects: &mut StagedObjects,
     staged_ids: &mut BTreeMap<ObjectId, (Kind, u64)>,
-) -> Result<Vec<ObjectId>, String> {
+) -> Result<Vec<ObjectId>, FsRefusal> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -1716,7 +1792,7 @@ fn stage_fileobj(
     pending_ids: &BTreeMap<ObjectId, (Kind, u64)>,
     objects: &mut StagedObjects,
     staged_ids: &mut BTreeMap<ObjectId, (Kind, u64)>,
-) -> Result<ObjectId, String> {
+) -> Result<ObjectId, FsRefusal> {
     let fileobj = FileObj {
         size,
         chunks: chunks.to_vec(),
@@ -1747,7 +1823,7 @@ fn stage_object(
     pending_ids: &BTreeMap<ObjectId, (Kind, u64)>,
     objects: &mut StagedObjects,
     staged_ids: &mut BTreeMap<ObjectId, (Kind, u64)>,
-) -> Result<ObjectId, String> {
+) -> Result<ObjectId, FsRefusal> {
     let id = object_id(kind, &body);
     // dedup against this commit's stages and the block-local index FIRST (no odb
     // read, no charge); only a genuinely-new object probes the committed odb.
@@ -1877,6 +1953,7 @@ mod object_read_budget {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
+    use crate::FsRefusal;
     use crate::fs::Fs;
     use crate::state::Refs;
     use crate::store::{MemStore, ObjectStore};
@@ -1952,7 +2029,7 @@ mod object_read_budget {
 
     /// `count` fresh documents into the already-existing `/shared/docs`, based on
     /// and landing on the head `seed_one_doc` left, under a shrunk `cap`.
-    fn commit_onto_head(count: usize, cap: usize) -> Result<(), String> {
+    fn commit_onto_head(count: usize, cap: usize) -> Result<(), FsRefusal> {
         let mut fs = new_fs();
         let head = seed_one_doc(&mut fs);
         fs.set_object_read_budget_for_tests(cap);
@@ -1995,8 +2072,9 @@ mod object_read_budget {
         commit_onto_head(DOCUMENTS, exact).expect("the op must fit in exactly 2N + 4 reads");
         let err = commit_onto_head(DOCUMENTS, exact - 1)
             .expect_err("one read less must refuse the very same op");
+        assert_eq!(err.class(), refusal_class::CAPACITY, "{err:?}");
         assert!(
-            err.contains("object-read budget"),
+            err.to_string().contains("object-read budget"),
             "reason must carry the shared needle, got: {err}"
         );
     }
@@ -2036,8 +2114,9 @@ mod object_read_budget {
             )
             .map(|_| ())
             .expect_err("over-budget commit must reject");
+        assert_eq!(err.class(), refusal_class::CAPACITY, "{err:?}");
         assert!(
-            err.contains("object-read budget"),
+            err.to_string().contains("object-read budget"),
             "reason must carry the shared needle, got: {err}"
         );
         assert_eq!(
@@ -2110,9 +2189,101 @@ mod object_read_budget {
             )
             .map(|_| ())
             .expect_err("staging past the cap must reject");
+        assert_eq!(err.class(), refusal_class::CAPACITY, "{err:?}");
         assert!(
-            err.contains("object-read budget"),
+            err.to_string().contains("object-read budget"),
             "reason must carry the shared needle, got: {err}"
+        );
+    }
+}
+
+// the per-path CAS refusal, driven end to end: the ONE refusal a writer is
+// expected to retry on, so the class it carries is the whole reason `commit`
+// answers with a type instead of a sentence.
+#[cfg(test)]
+mod commit_conflict {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    use crate::FsRefusal;
+    use crate::fs::Fs;
+    use crate::state::Refs;
+    use crate::store::{MemStore, ObjectStore};
+    use crate::wire::{Change, Content};
+
+    fn new_fs() -> Fs<MemStore> {
+        Fs::new(MemStore::new(), Refs::default())
+    }
+
+    /// drain the pending block, flush its objects, adopt — the pure-core twin of
+    /// `module.rs commit_block`.
+    fn commit_block(fs: &mut Fs<MemStore>) {
+        if let Some((refs, _height, objects)) = fs.commit_block() {
+            for (kind, body) in &objects {
+                fs.store_mut().put(*kind, body).unwrap();
+            }
+            fs.adopt_refs(refs);
+        }
+    }
+
+    fn put_inline(path: &str, content: &[u8]) -> Change {
+        Change::Put {
+            path: path.into(),
+            exec: false,
+            meta: Default::default(),
+            content: Content::Inline {
+                b64: STANDARD.encode(content),
+            },
+        }
+    }
+
+    fn write_at(fs: &mut Fs<MemStore>, height: u64, base: Option<String>, body: &[u8]) -> String {
+        fs.commit(
+            &crate::Authority::System,
+            height,
+            height,
+            base,
+            "write".into(),
+            vec![put_inline("/shared/docs/note", body)],
+        )
+        .expect("this commit threads the current head");
+        commit_block(fs);
+        fs.committed_head_for_test().expect("head present")
+    }
+
+    /// a second writer landed on the path between our base and the head: the
+    /// refusal is `stale`, and the sentence names the path we must re-read —
+    /// which is exactly what a caller needs and what no other class means.
+    #[test]
+    fn a_commit_onto_a_stale_head_refuses_with_the_path_that_moved() {
+        let mut fs = new_fs();
+        let base = write_at(&mut fs, 1, None, b"first");
+        // someone else rewrites the very path we are about to write, and their
+        // block is adopted, so the head moves out from under our base.
+        write_at(&mut fs, 2, Some(base.clone()), b"theirs");
+
+        let Err(err) = fs.commit(
+            &crate::Authority::System,
+            3,
+            3,
+            Some(base),
+            "ours".into(),
+            vec![put_inline("/shared/docs/note", b"ours")],
+        ) else {
+            panic!("a commit onto a stale head must refuse");
+        };
+        assert_eq!(
+            err,
+            FsRefusal::CommitConflict {
+                path: "/shared/docs/note".into()
+            }
+        );
+        assert_eq!(err.class(), refusal_class::STALE, "{err}");
+        // the frame splits on the first `": "`, so the sentence may keep the
+        // `conflict:` shape the wire has always carried.
+        assert_eq!(
+            err.to_string(),
+            "conflict: /shared/docs/note changed since base"
         );
     }
 }

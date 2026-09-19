@@ -21,6 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::MAX_DIR_ENTRIES;
 use crate::objects::{EntryKind, Kind, ObjectId, SnapshotObj, TreeEntry, TreeObj, object_id};
+use crate::paths::join_segs;
+use crate::refusal::FsRefusal;
 use crate::store::ObjectStore;
 
 /// the per-op DISTINCT committed-store read budget — the files consensus cap
@@ -78,17 +80,19 @@ impl<'a> ReadBudget<'a> {
     /// past the cap — a stable snake-case-friendly reason carrying the
     /// `object-read budget` needle the parity proof keys on (aligned with the
     /// kernel's `object-read budget exceeded (…)`).
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<(), FsRefusal> {
         let charged = self.gets.borrow().len() + self.stats.borrow().len();
         if charged > self.cap {
-            return Err(format!("object-read budget exceeded ({})", self.cap));
+            return Err(FsRefusal::Capacity {
+                what: format!("object-read budget exceeded ({})", self.cap),
+            });
         }
         Ok(())
     }
 
     /// charge one committed `object-get` (a Tree/Snapshot/File body read). a
     /// block-local id is served by the overlay and never charged.
-    fn charge_get(&self, id: &ObjectId) -> Result<(), String> {
+    fn charge_get(&self, id: &ObjectId) -> Result<(), FsRefusal> {
         if self.block_index.contains_key(id) {
             return Ok(());
         }
@@ -99,7 +103,7 @@ impl<'a> ReadBudget<'a> {
     /// charge one committed `object-stat` (`stage_object`'s presence probe for a
     /// newly-staged object). the block-local skip mirrors `charge_get`; the
     /// callers already gate the probe on `!block_index`, so it is belt-and-braces.
-    fn charge_stat(&self, id: &ObjectId) -> Result<(), String> {
+    fn charge_stat(&self, id: &ObjectId) -> Result<(), FsRefusal> {
         if self.block_index.contains_key(id) {
             return Ok(());
         }
@@ -133,7 +137,7 @@ impl Store<'_> {
     /// pending set is small; task 9 may want an index here if a single block
     /// ever chains many commits (coordinate with putblob's staging dedup, which
     /// has the same "hash the buffered bytes" shape).
-    pub(crate) fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, String> {
+    pub(crate) fn get(&self, id: &ObjectId) -> Result<Option<(Kind, Vec<u8>)>, FsRefusal> {
         for (kind, body) in self.pending {
             if object_id(*kind, body) == *id {
                 return Ok(Some((*kind, body.clone())));
@@ -146,13 +150,13 @@ impl Store<'_> {
         if let Some(budget) = self.budget {
             budget.charge_get(id)?;
         }
-        self.store.get(id)
+        self.store.get(id).map_err(FsRefusal::Storage)
     }
 
     /// a committed-store presence probe (`object-stat`) that CHARGES the
     /// execute-path budget, for the `stage_object` dedup path. off the execute
     /// path (`budget: None`) it is a plain `has`.
-    pub(crate) fn has_committed(&self, id: &ObjectId) -> Result<bool, String> {
+    pub(crate) fn has_committed(&self, id: &ObjectId) -> Result<bool, FsRefusal> {
         if let Some(budget) = self.budget {
             budget.charge_stat(id)?;
         }
@@ -161,14 +165,14 @@ impl Store<'_> {
 }
 
 /// decode the snapshot object and hand back the root tree it commits.
-pub fn snapshot_root_tree(store: &Store, snapshot: &ObjectId) -> Result<ObjectId, String> {
+pub fn snapshot_root_tree(store: &Store, snapshot: &ObjectId) -> Result<ObjectId, FsRefusal> {
     let (kind, body) = store
         .get(snapshot)?
-        .ok_or_else(|| "snapshot object missing from store".to_string())?;
+        .ok_or_else(|| FsRefusal::Corrupt("snapshot object missing from store".into()))?;
     if kind != Kind::Snapshot {
-        return Err("expected a snapshot object".into());
+        return Err(FsRefusal::Corrupt("expected a snapshot object".into()));
     }
-    Ok(SnapshotObj::decode(&body)?.root)
+    Ok(SnapshotObj::decode(&body).map_err(FsRefusal::Corrupt)?.root)
 }
 
 /// resolve `segs` against the committed tree rooted at `root_tree`, decoding one
@@ -180,7 +184,7 @@ pub fn entry_at(
     store: &Store,
     root_tree: Option<ObjectId>,
     segs: &[String],
-) -> Result<Option<TreeEntry>, String> {
+) -> Result<Option<TreeEntry>, FsRefusal> {
     let Some(root) = root_tree else {
         return Ok(None);
     };
@@ -248,10 +252,15 @@ impl TreeEdit {
     /// rejects if a non-directory sits on the path to the target (a file in the
     /// way of a descent). replaces whatever entry currently sits at the final
     /// segment — the commit executor (task 9) layers any higher-level policy.
-    pub fn put(&mut self, store: &Store, segs: &[String], entry: TreeEntry) -> Result<(), String> {
-        let (name, dirs) = segs
-            .split_last()
-            .ok_or_else(|| "cannot put the root itself".to_string())?;
+    pub fn put(
+        &mut self,
+        store: &Store,
+        segs: &[String],
+        entry: TreeEntry,
+    ) -> Result<(), FsRefusal> {
+        let (name, dirs) = segs.split_last().ok_or_else(|| FsRefusal::InvalidRequest {
+            why: "cannot put the root itself".into(),
+        })?;
         let parent = navigate(&mut self.root, store, dirs, true)?;
         parent.insert(name.clone(), Node::Ref(entry));
         Ok(())
@@ -259,13 +268,15 @@ impl TreeEdit {
 
     /// create an empty directory at `segs`, auto-creating missing parents.
     /// rejects if anything already exists at the target.
-    pub fn mkdir(&mut self, store: &Store, segs: &[String]) -> Result<(), String> {
-        let (name, dirs) = segs
-            .split_last()
-            .ok_or_else(|| "cannot mkdir the root itself".to_string())?;
+    pub fn mkdir(&mut self, store: &Store, segs: &[String]) -> Result<(), FsRefusal> {
+        let (name, dirs) = segs.split_last().ok_or_else(|| FsRefusal::InvalidRequest {
+            why: "cannot mkdir the root itself".into(),
+        })?;
         let parent = navigate(&mut self.root, store, dirs, true)?;
         if parent.contains_key(name) {
-            return Err("mkdir target already exists".into());
+            return Err(FsRefusal::AlreadyExists {
+                path: join_segs(segs),
+            });
         }
         parent.insert(name.clone(), Node::Dir(BTreeMap::new()));
         Ok(())
@@ -274,13 +285,15 @@ impl TreeEdit {
     /// remove the entry at `segs` — a file, a symlink, or a whole subtree.
     /// rejects if the target (or any parent on the way) does not exist; missing
     /// parents are NOT created for a removal.
-    pub fn rm(&mut self, store: &Store, segs: &[String]) -> Result<(), String> {
-        let (name, dirs) = segs
-            .split_last()
-            .ok_or_else(|| "cannot rm the root itself".to_string())?;
+    pub fn rm(&mut self, store: &Store, segs: &[String]) -> Result<(), FsRefusal> {
+        let (name, dirs) = segs.split_last().ok_or_else(|| FsRefusal::InvalidRequest {
+            why: "cannot rm the root itself".into(),
+        })?;
         let parent = navigate(&mut self.root, store, dirs, false)?;
         if parent.remove(name).is_none() {
-            return Err("rm target does not exist".into());
+            return Err(FsRefusal::PathNotFound {
+                path: join_segs(segs),
+            });
         }
         Ok(())
     }
@@ -300,25 +313,30 @@ impl TreeEdit {
     /// directory is an error (POSIX `rename` semantics), unlike put which creates
     /// missing parents. moving a path into its own subtree is rejected too (it
     /// would orphan the moved tree).
-    pub fn mv(&mut self, store: &Store, from: &[String], to: &[String]) -> Result<(), String> {
-        let (from_name, from_dirs) = from
-            .split_last()
-            .ok_or_else(|| "cannot mv the root itself".to_string())?;
-        let (to_name, to_dirs) = to
-            .split_last()
-            .ok_or_else(|| "cannot mv onto the root itself".to_string())?;
+    pub fn mv(&mut self, store: &Store, from: &[String], to: &[String]) -> Result<(), FsRefusal> {
+        let (from_name, from_dirs) =
+            from.split_last().ok_or_else(|| FsRefusal::InvalidRequest {
+                why: "cannot mv the root itself".into(),
+            })?;
+        let (to_name, to_dirs) = to.split_last().ok_or_else(|| FsRefusal::InvalidRequest {
+            why: "cannot mv onto the root itself".into(),
+        })?;
         // a path cannot move into its own subtree (from == to, or to under from):
         // build would try to re-parent the tree under a node it just removed. this
         // also subsumes the from == to no-op (to would be present anyway).
         if to.len() >= from.len() && to[..from.len()] == *from {
-            return Err("cannot move a path into its own subtree".into());
+            return Err(FsRefusal::InvalidRequest {
+                why: format!("cannot move {} into its own subtree", join_segs(from)),
+            });
         }
         // validate BEFORE mutating so a rejected mv leaves the overlay untouched:
         // 1. source must exist under its (already-existing) parent.
         {
             let parent = navigate(&mut self.root, store, from_dirs, false)?;
             if !parent.contains_key(from_name) {
-                return Err("mv source does not exist".into());
+                return Err(FsRefusal::PathNotFound {
+                    path: join_segs(from),
+                });
             }
         }
         // 2. destination parent must already exist as a dir (no auto-create), and
@@ -326,7 +344,9 @@ impl TreeEdit {
         {
             let parent = navigate(&mut self.root, store, to_dirs, false)?;
             if parent.contains_key(to_name) {
-                return Err("mv destination already exists".into());
+                return Err(FsRefusal::AlreadyExists {
+                    path: join_segs(to),
+                });
             }
         }
         // 3. lift the node out of its source parent and drop it under the dest
@@ -343,7 +363,7 @@ impl TreeEdit {
 
     /// read the entry at `segs` as the edit currently sees it (overlay first,
     /// then decode on descent). `None` for an absent path or the root itself.
-    pub fn get(&self, store: &Store, segs: &[String]) -> Result<Option<TreeEntry>, String> {
+    pub fn get(&self, store: &Store, segs: &[String]) -> Result<Option<TreeEntry>, FsRefusal> {
         if segs.is_empty() {
             return Ok(None);
         }
@@ -357,7 +377,7 @@ impl TreeEdit {
     /// untouched `Ref` re-emits its existing id with NO re-encode. returns the
     /// new root tree id, or `None` for a completely empty root (the empty
     /// filesystem, which has no root object).
-    pub fn build(self, out: &mut Vec<(Kind, Vec<u8>)>) -> Result<Option<ObjectId>, String> {
+    pub fn build(self, out: &mut Vec<(Kind, Vec<u8>)>) -> Result<Option<ObjectId>, FsRefusal> {
         match self.root {
             // nothing was touched: the whole tree is reused by its existing id.
             Node::Ref(entry) => Ok(Some(entry.id)),
@@ -376,18 +396,18 @@ impl TreeEdit {
 // ---- internals --------------------------------------------------------------
 
 /// decode the tree object at `id` into its entries.
-fn fetch_tree(store: &Store, id: &ObjectId) -> Result<BTreeMap<String, TreeEntry>, String> {
+fn fetch_tree(store: &Store, id: &ObjectId) -> Result<BTreeMap<String, TreeEntry>, FsRefusal> {
     let (kind, body) = store
         .get(id)?
-        .ok_or_else(|| "tree object missing from store".to_string())?;
+        .ok_or_else(|| FsRefusal::Corrupt("tree object missing from store".into()))?;
     if kind != Kind::Tree {
-        return Err("expected a tree object".into());
+        return Err(FsRefusal::Corrupt("expected a tree object".into()));
     }
-    Ok(TreeObj::decode(&body)?.entries)
+    Ok(TreeObj::decode(&body).map_err(FsRefusal::Corrupt)?.entries)
 }
 
 /// decode the directory at `id` into overlay nodes — every child a lazy `Ref`.
-fn load_children(store: &Store, id: &ObjectId) -> Result<BTreeMap<String, Node>, String> {
+fn load_children(store: &Store, id: &ObjectId) -> Result<BTreeMap<String, Node>, FsRefusal> {
     Ok(fetch_tree(store, id)?
         .into_iter()
         .map(|(name, entry)| (name, Node::Ref(entry)))
@@ -397,10 +417,15 @@ fn load_children(store: &Store, id: &ObjectId) -> Result<BTreeMap<String, Node>,
 /// force `node` to be a `Dir` in place: a `Ref` to a directory is decoded into
 /// its children; a `Ref` to a file or symlink is a descent into a non-directory
 /// and rejects; an already-materialized `Dir` is left alone.
-fn materialize(store: &Store, node: &mut Node) -> Result<(), String> {
+fn materialize(store: &Store, node: &mut Node, at: &[String]) -> Result<(), FsRefusal> {
     if let Node::Ref(entry) = node {
         if entry.kind != EntryKind::Dir {
-            return Err("a file or symlink is in the way of a directory path".into());
+            return Err(FsRefusal::InvalidRequest {
+                why: format!(
+                    "a file or symlink is in the way of the directory path {}",
+                    join_segs(at)
+                ),
+            });
         }
         let children = load_children(store, &entry.id)?;
         *node = Node::Dir(children);
@@ -418,10 +443,10 @@ fn navigate<'e>(
     store: &Store,
     dirs: &[String],
     create: bool,
-) -> Result<&'e mut BTreeMap<String, Node>, String> {
+) -> Result<&'e mut BTreeMap<String, Node>, FsRefusal> {
     let mut cur: &'e mut Node = root;
-    for seg in dirs {
-        materialize(store, cur)?;
+    for (i, seg) in dirs.iter().enumerate() {
+        materialize(store, cur, &dirs[..i])?;
         // inline match (not a helper returning the borrow) so the reborrow that
         // reassigns `cur` below threads cleanly through the loop under NLL.
         let map = match cur {
@@ -430,13 +455,15 @@ fn navigate<'e>(
         };
         if !map.contains_key(seg) {
             if !create {
-                return Err("a directory on the path does not exist".into());
+                return Err(FsRefusal::PathNotFound {
+                    path: join_segs(&dirs[..=i]),
+                });
             }
             map.insert(seg.clone(), Node::Dir(BTreeMap::new()));
         }
         cur = map.get_mut(seg).expect("ensured present above");
     }
-    materialize(store, cur)?;
+    materialize(store, cur, dirs)?;
     match cur {
         Node::Dir(map) => Ok(map),
         Node::Ref(_) => unreachable!("materialize made this a Dir"),
@@ -445,7 +472,7 @@ fn navigate<'e>(
 
 /// read-only descent for `get`: resolve `segs` against `node` without mutating
 /// the overlay, decoding `Ref` directories transiently as needed.
-fn walk_get(store: &Store, node: &Node, segs: &[String]) -> Result<Option<TreeEntry>, String> {
+fn walk_get(store: &Store, node: &Node, segs: &[String]) -> Result<Option<TreeEntry>, FsRefusal> {
     let Some((head, rest)) = segs.split_first() else {
         return Ok(None);
     };
@@ -469,7 +496,7 @@ fn walk_get(store: &Store, node: &Node, segs: &[String]) -> Result<Option<TreeEn
 }
 
 /// either return the resolved entry (`rest` empty) or keep descending.
-fn step_get(store: &Store, child: &Node, rest: &[String]) -> Result<Option<TreeEntry>, String> {
+fn step_get(store: &Store, child: &Node, rest: &[String]) -> Result<Option<TreeEntry>, FsRefusal> {
     if rest.is_empty() {
         match child {
             Node::Ref(entry) => Ok(Some(*entry)),
@@ -492,7 +519,7 @@ fn step_get(store: &Store, child: &Node, rest: &[String]) -> Result<Option<TreeE
 fn build_dir(
     children: BTreeMap<String, Node>,
     out: &mut Vec<(Kind, Vec<u8>)>,
-) -> Result<TreeEntry, String> {
+) -> Result<TreeEntry, FsRefusal> {
     let mut entries: BTreeMap<String, TreeEntry> = BTreeMap::new();
     for (name, child) in children {
         let entry = match child {
@@ -502,7 +529,9 @@ fn build_dir(
         entries.insert(name, entry);
     }
     if entries.len() > MAX_DIR_ENTRIES {
-        return Err("directory exceeds the maximum entry count".into());
+        return Err(FsRefusal::Capacity {
+            what: "directory exceeds the maximum entry count".into(),
+        });
     }
     let size = entries.len() as u64;
     let body = TreeObj { entries }.encode();
@@ -518,7 +547,7 @@ fn build_dir(
 
 /// the id/size a materialized directory would encode to, WITHOUT staging any
 /// object — the read-only twin of [`build_dir`] used only by `get`.
-fn dir_entry_readonly(node: &Node) -> Result<TreeEntry, String> {
+fn dir_entry_readonly(node: &Node) -> Result<TreeEntry, FsRefusal> {
     match node {
         Node::Ref(entry) => Ok(*entry),
         Node::Dir(map) => {
@@ -527,7 +556,9 @@ fn dir_entry_readonly(node: &Node) -> Result<TreeEntry, String> {
                 entries.insert(name.clone(), dir_entry_readonly(child)?);
             }
             if entries.len() > MAX_DIR_ENTRIES {
-                return Err("directory exceeds the maximum entry count".into());
+                return Err(FsRefusal::Capacity {
+                    what: "directory exceeds the maximum entry count".into(),
+                });
             }
             let size = entries.len() as u64;
             let body = TreeObj { entries }.encode();

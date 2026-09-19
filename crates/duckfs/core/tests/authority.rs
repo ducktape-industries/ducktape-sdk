@@ -1,5 +1,6 @@
 use duckfs_core::{
-    Actor, Authority, Change, Content, Fs, MemStore, ObjectStore, Refs, STAGING_TTL_BLOCKS,
+    Actor, Authority, Change, Content, Fs, FsRefusal, MemStore, ObjectStore, Refs,
+    STAGING_TTL_BLOCKS,
 };
 
 fn signed(key: u8, account: Option<u64>) -> Authority {
@@ -14,7 +15,7 @@ fn write(
     authority: &Authority,
     height: u64,
     path: &str,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     fs.commit(
         authority,
         height,

@@ -184,7 +184,9 @@ fn collect_retention(
                 }
             }
             Kind::File => {
-                let snapshot = crate::retention::decode_record(&body)?.snapshot();
+                let snapshot = crate::retention::decode_record(&body)
+                    .map_err(|e| e.to_string())?
+                    .snapshot();
                 collect_snapshot(&snapshot, store, visited, missing, verify_chunks)?;
             }
             Kind::Chunk | Kind::Snapshot => {

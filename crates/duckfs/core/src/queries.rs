@@ -15,7 +15,8 @@ use crate::objects::{
     EntryKind, FileObj, Kind, ObjectId, SnapshotObj, TreeEntry, TreeObj, object_id,
     verify_chunk_len,
 };
-use crate::paths::canonical;
+use crate::paths::{canonical, join_segs};
+use crate::refusal::FsRefusal;
 use crate::store::ObjectStore;
 use crate::tree::{Store, entry_at, snapshot_root_tree};
 use crate::wire::{
@@ -30,7 +31,7 @@ const MAX_DIFF_ENTRIES: usize = MAX_PAGE as usize * 16;
 
 /// dispatch a committed-state query. task 9 serves `Stat`; task 11 serves
 /// `Ls`/`Read`/`Refs`; task 12 serves `Find`/`Grep`/`History`/`Diff`.
-pub(crate) fn query<S: ObjectStore>(fs: &Fs<S>, q: FilesQuery) -> Result<FilesReply, String> {
+pub(crate) fn query<S: ObjectStore>(fs: &Fs<S>, q: FilesQuery) -> Result<FilesReply, FsRefusal> {
     match q {
         FilesQuery::Stat { path, snapshot } => stat(fs, &path, snapshot.as_deref()),
         FilesQuery::Ls {
@@ -73,7 +74,7 @@ pub(crate) fn query<S: ObjectStore>(fs: &Fs<S>, q: FilesQuery) -> Result<FilesRe
     }
 }
 
-fn retention<S: ObjectStore>(fs: &Fs<S>, module: &str, key: &str) -> Result<FilesReply, String> {
+fn retention<S: ObjectStore>(fs: &Fs<S>, module: &str, key: &str) -> Result<FilesReply, FsRefusal> {
     let store = Store {
         store: fs.store_ref(),
         pending: &[],
@@ -99,14 +100,18 @@ fn retention<S: ObjectStore>(fs: &Fs<S>, module: &str, key: &str) -> Result<File
 /// strictness mirrors the sync lane: beyond [`MAX_SYNC_IDS`] the whole request
 /// rejects, and any non-hex id rejects the WHOLE batch (a malformed batch is a
 /// client bug, not a per-id absence).
-fn has_chunks<S: ObjectStore>(fs: &Fs<S>, ids: &[String]) -> Result<FilesReply, String> {
+fn has_chunks<S: ObjectStore>(fs: &Fs<S>, ids: &[String]) -> Result<FilesReply, FsRefusal> {
     if ids.len() > MAX_SYNC_IDS {
-        return Err("too many ids".into());
+        return Err(FsRefusal::InvalidRequest {
+            why: "too many ids".into(),
+        });
     }
     let refs = fs.refs_view();
     let mut present = Vec::with_capacity(ids.len());
     for hex in ids {
-        let id = from_hex_32(hex).ok_or_else(|| "id is not hex".to_string())?;
+        let id = from_hex_32(hex).ok_or_else(|| FsRefusal::InvalidRequest {
+            why: "id is not hex".into(),
+        })?;
         present.push(refs.staging.contains_key(&id));
     }
     Ok(FilesReply::HasChunks { present })
@@ -119,19 +124,23 @@ fn has_chunks<S: ObjectStore>(fs: &Fs<S>, ids: &[String]) -> Result<FilesReply, 
 fn resolve_head<S: ObjectStore>(
     fs: &Fs<S>,
     snapshot: Option<&str>,
-) -> Result<Option<ObjectId>, String> {
+) -> Result<Option<ObjectId>, FsRefusal> {
     let refs = fs.refs_view();
     match snapshot {
         None => Ok(refs.head),
         Some(hex) => {
-            let id = from_hex_32(hex).ok_or_else(|| "snapshot not resolvable".to_string())?;
+            let id = from_hex_32(hex).ok_or_else(|| FsRefusal::SnapshotUnresolvable {
+                snapshot: hex.to_string(),
+            })?;
             let store = Store {
                 store: fs.store_ref(),
                 pending: &[],
                 budget: None,
             };
             if !refs_contains_snapshot(refs, &store, &id)? {
-                return Err("snapshot not resolvable".into());
+                return Err(FsRefusal::SnapshotUnresolvable {
+                    snapshot: hex.to_string(),
+                });
             }
             Ok(Some(id))
         }
@@ -143,7 +152,7 @@ fn resolve_head<S: ObjectStore>(
 fn committed_view<'a, S: ObjectStore>(
     fs: &'a Fs<S>,
     snapshot: Option<&str>,
-) -> Result<(Store<'a>, Option<ObjectId>), String> {
+) -> Result<(Store<'a>, Option<ObjectId>), FsRefusal> {
     let head = resolve_head(fs, snapshot)?;
     let store = Store {
         store: fs.store_ref(),
@@ -167,9 +176,12 @@ fn stat<S: ObjectStore>(
     fs: &Fs<S>,
     path: &str,
     snapshot: Option<&str>,
-) -> Result<FilesReply, String> {
+) -> Result<FilesReply, FsRefusal> {
     let (store, root_tree) = committed_view(fs, snapshot)?;
-    let segs = canonical(path)?;
+    let segs = canonical(path).map_err(|why| FsRefusal::InvalidPath {
+        path: path.to_string(),
+        why,
+    })?;
     let entry = if segs.is_empty() {
         root_entry(&store, root_tree)?
     } else if let Some(entry) = entry_at(&store, root_tree, &segs)? {
@@ -194,7 +206,7 @@ fn stat<S: ObjectStore>(
 /// root, so a root before its first file and after its last one address alike.
 ///
 /// [`TreeEdit`]: crate::tree::TreeEdit
-fn root_entry(store: &Store, root_tree: Option<ObjectId>) -> Result<TreeEntry, String> {
+fn root_entry(store: &Store, root_tree: Option<ObjectId>) -> Result<TreeEntry, FsRefusal> {
     Ok(TreeEntry {
         kind: EntryKind::Dir,
         id: root_tree.unwrap_or_else(|| {
@@ -221,9 +233,12 @@ fn ls<S: ObjectStore>(
     snapshot: Option<&str>,
     after: Option<&str>,
     limit: u64,
-) -> Result<FilesReply, String> {
+) -> Result<FilesReply, FsRefusal> {
     let (store, root_tree) = committed_view(fs, snapshot)?;
-    let segs = canonical(path)?;
+    let segs = canonical(path).map_err(|why| FsRefusal::InvalidPath {
+        path: path.to_string(),
+        why,
+    })?;
 
     // resolve the directory whose entries we list, and the joined prefix each
     // child path is built under. the root (empty segs) lists the root tree, which
@@ -237,12 +252,18 @@ fn ls<S: ObjectStore>(
             None if crate::paths::is_namespace_root(&segs) => {
                 (None, format!("/{}", segs.join("/")))
             }
-            None => return Err("path not found".into()),
+            None => {
+                return Err(FsRefusal::PathNotFound {
+                    path: join_segs(&segs),
+                });
+            }
             Some(entry) => match entry.kind {
                 EntryKind::Dir => (Some(entry.id), format!("/{}", segs.join("/"))),
                 // a file or symlink has no directory listing.
                 EntryKind::File | EntryKind::Symlink => {
-                    return Err("not a directory".into());
+                    return Err(FsRefusal::NotADirectory {
+                        path: join_segs(&segs),
+                    });
                 }
             },
         }
@@ -284,20 +305,33 @@ fn read<S: ObjectStore>(
     snapshot: Option<&str>,
     offset: u64,
     len: u64,
-) -> Result<FilesReply, String> {
+) -> Result<FilesReply, FsRefusal> {
     let (store, root_tree) = committed_view(fs, snapshot)?;
-    let segs = canonical(path)?;
+    let segs = canonical(path).map_err(|why| FsRefusal::InvalidPath {
+        path: path.to_string(),
+        why,
+    })?;
     // the filesystem root is a directory, never a file.
     if segs.is_empty() {
-        return Err("not a file".into());
+        return Err(FsRefusal::NotAFile {
+            path: join_segs(&segs),
+        });
     }
     let entry = match entry_at(&store, root_tree, &segs)? {
-        None => return Err("path not found".into()),
+        None => {
+            return Err(FsRefusal::PathNotFound {
+                path: join_segs(&segs),
+            });
+        }
         Some(entry) => entry,
     };
     match entry.kind {
         EntryKind::File | EntryKind::Symlink => {}
-        EntryKind::Dir => return Err("not a file".into()),
+        EntryKind::Dir => {
+            return Err(FsRefusal::NotAFile {
+                path: join_segs(&segs),
+            });
+        }
     }
 
     let file = load_fileobj(&store, &entry.id)?;
@@ -313,7 +347,7 @@ fn read<S: ObjectStore>(
 
 /// the committed refs summary: head hex, name→snapshot pin map, and the current
 /// bounded history window length.
-fn refs<S: ObjectStore>(fs: &Fs<S>) -> Result<FilesReply, String> {
+fn refs<S: ObjectStore>(fs: &Fs<S>) -> Result<FilesReply, FsRefusal> {
     let refs = fs.refs_view();
     let pins = refs
         .pins
@@ -347,7 +381,7 @@ fn find<S: ObjectStore>(
     snapshot: Option<&str>,
     after: Option<&str>,
     limit: u64,
-) -> Result<FilesReply, String> {
+) -> Result<FilesReply, FsRefusal> {
     let (store, root_tree) = committed_view(fs, snapshot)?;
     // 0 is a useless page; the honest clamp is 1..=MAX_PAGE (as Ls).
     let mut acc = FindAcc {
@@ -384,7 +418,7 @@ fn find_walk(
     dir_tree: Option<ObjectId>,
     base: &str,
     acc: &mut FindAcc,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     if acc.done {
         return Ok(());
     }
@@ -450,12 +484,16 @@ fn grep<S: ObjectStore>(
     snapshot: Option<&str>,
     cursor: Option<&str>,
     limit: u64,
-) -> Result<FilesReply, String> {
+) -> Result<FilesReply, FsRefusal> {
     if pattern.is_empty() {
-        return Err("grep pattern must not be empty".into());
+        return Err(FsRefusal::InvalidRequest {
+            why: "grep pattern must not be empty".into(),
+        });
     }
     if pattern.len() > MAX_GREP_LINE_BYTES {
-        return Err("grep pattern exceeds the line byte cap".into());
+        return Err(FsRefusal::Capacity {
+            what: "grep pattern exceeds the line byte cap".into(),
+        });
     }
     // resolve the snapshot HERE (not via committed_view) because a hit's evidence
     // locator needs the resolved snapshot hex, not just its root tree.
@@ -525,7 +563,7 @@ fn grep_walk(
     dir_tree: Option<ObjectId>,
     base: &str,
     acc: &mut GrepAcc,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     if acc.done {
         return Ok(());
     }
@@ -565,7 +603,7 @@ fn grep_file(
     path: &str,
     entry: &TreeEntry,
     acc: &mut GrepAcc,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     if acc.hits.len() >= acc.limit {
         // page full → resume strictly after the last file we fully scanned.
         acc.next = acc.last_scanned.clone();
@@ -620,7 +658,7 @@ fn grep_file(
 /// history: the bounded commit window newest-first (head first), clamped to
 /// [`MAX_PAGE`]. the window is stored newest-LAST (commit push_back), so
 /// newest-first is a reverse walk; each id decodes its snapshot object.
-fn history<S: ObjectStore>(fs: &Fs<S>, limit: u64) -> Result<FilesReply, String> {
+fn history<S: ObjectStore>(fs: &Fs<S>, limit: u64) -> Result<FilesReply, FsRefusal> {
     let refs = fs.refs_view();
     let store = Store {
         store: fs.store_ref(),
@@ -634,11 +672,11 @@ fn history<S: ObjectStore>(fs: &Fs<S>, limit: u64) -> Result<FilesReply, String>
     for id in refs.window.iter().rev().take(limit) {
         let (kind, body) = store
             .get(id)?
-            .ok_or_else(|| "snapshot object missing from store".to_string())?;
+            .ok_or_else(|| FsRefusal::Corrupt("snapshot object missing from store".into()))?;
         if kind != Kind::Snapshot {
-            return Err("expected a snapshot object".into());
+            return Err(FsRefusal::Corrupt("expected a snapshot object".into()));
         }
-        let snap = SnapshotObj::decode(&body)?;
+        let snap = SnapshotObj::decode(&body).map_err(FsRefusal::Corrupt)?;
         out.push(SnapshotInfo {
             id: to_hex(id),
             parent: snap.parent.as_ref().map(|p| to_hex(p)),
@@ -669,7 +707,7 @@ fn diff<S: ObjectStore>(
     from: &str,
     to: &str,
     prefix: &str,
-) -> Result<FilesReply, String> {
+) -> Result<FilesReply, FsRefusal> {
     let store = Store {
         store: fs.store_ref(),
         pending: &[],
@@ -679,9 +717,12 @@ fn diff<S: ObjectStore>(
     };
     // Some(hex) resolves to Some(id) on success (the None branch is the no-head
     // read only), so the ok_or is defensive — an unresolvable id already errored.
-    let from_id =
-        resolve_head(fs, Some(from))?.ok_or_else(|| "snapshot not resolvable".to_string())?;
-    let to_id = resolve_head(fs, Some(to))?.ok_or_else(|| "snapshot not resolvable".to_string())?;
+    let from_id = resolve_head(fs, Some(from))?.ok_or_else(|| FsRefusal::SnapshotUnresolvable {
+        snapshot: from.to_string(),
+    })?;
+    let to_id = resolve_head(fs, Some(to))?.ok_or_else(|| FsRefusal::SnapshotUnresolvable {
+        snapshot: to.to_string(),
+    })?;
     let from_root = snapshot_root_tree(&store, &from_id)?;
     let to_root = snapshot_root_tree(&store, &to_id)?;
     let mut out = Vec::new();
@@ -698,7 +739,7 @@ fn diff_walk(
     base: &str,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     // CoW prune: identical subtree ids share every byte — skip without decoding.
     if from_id == to_id {
         return Ok(());
@@ -753,7 +794,7 @@ fn emit_side(
     kind: DiffKind,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     push_diff(out, path, kind.clone(), prefix)?;
     if entry.kind == EntryKind::Dir {
         emit_children(store, path, entry.id, kind, prefix, out)?;
@@ -770,7 +811,7 @@ fn emit_children(
     kind: DiffKind,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     for (name, entry) in dir_entries(store, Some(dir_id))? {
         let child = format!("{base}/{name}");
         if !subtree_may_match(&child, prefix) {
@@ -789,7 +830,7 @@ fn push_diff(
     path: &str,
     kind: DiffKind,
     prefix: &str,
-) -> Result<(), String> {
+) -> Result<(), FsRefusal> {
     if !path.starts_with(prefix) {
         return Ok(());
     }
@@ -798,7 +839,9 @@ fn push_diff(
         kind,
     });
     if out.len() > MAX_DIFF_ENTRIES {
-        return Err("diff too large, narrow the prefix".into());
+        return Err(FsRefusal::Capacity {
+            what: "diff too large, narrow the prefix".into(),
+        });
     }
     Ok(())
 }
@@ -879,7 +922,7 @@ fn entry_info(
     store: &Store,
     path: &str,
     entry: &crate::objects::TreeEntry,
-) -> Result<EntryInfo, String> {
+) -> Result<EntryInfo, FsRefusal> {
     let meta = match entry.kind {
         EntryKind::File | EntryKind::Symlink => load_fileobj(store, &entry.id)?.meta,
         EntryKind::Dir => BTreeMap::new(),
@@ -899,28 +942,28 @@ fn entry_info(
 fn dir_entries(
     store: &Store,
     dir_tree: Option<ObjectId>,
-) -> Result<BTreeMap<String, crate::objects::TreeEntry>, String> {
+) -> Result<BTreeMap<String, crate::objects::TreeEntry>, FsRefusal> {
     let Some(id) = dir_tree else {
         return Ok(BTreeMap::new());
     };
     let (kind, body) = store
         .get(&id)?
-        .ok_or_else(|| "tree object missing from store".to_string())?;
+        .ok_or_else(|| FsRefusal::Corrupt("tree object missing from store".into()))?;
     if kind != Kind::Tree {
-        return Err("expected a tree object".into());
+        return Err(FsRefusal::Corrupt("expected a tree object".into()));
     }
-    Ok(TreeObj::decode(&body)?.entries)
+    Ok(TreeObj::decode(&body).map_err(FsRefusal::Corrupt)?.entries)
 }
 
 /// decode the FileObj at `id` from the committed store (a file or symlink leaf).
-fn load_fileobj(store: &Store, id: &ObjectId) -> Result<FileObj, String> {
+fn load_fileobj(store: &Store, id: &ObjectId) -> Result<FileObj, FsRefusal> {
     let (kind, body) = store
         .get(id)?
-        .ok_or_else(|| "file object missing from store".to_string())?;
+        .ok_or_else(|| FsRefusal::Corrupt("file object missing from store".into()))?;
     if kind != Kind::File {
-        return Err("expected a file object".into());
+        return Err(FsRefusal::Corrupt("expected a file object".into()));
     }
-    FileObj::decode(&body)
+    FileObj::decode(&body).map_err(FsRefusal::Corrupt)
 }
 
 /// reassemble the byte range `[offset, offset+len)` of `file`, clipped to the
@@ -928,7 +971,7 @@ fn load_fileobj(store: &Store, id: &ObjectId) -> Result<FileObj, String> {
 /// byte / CHUNK_SIZE). a read at or past EOF is empty. a chunk object that is
 /// absent from the committed store is a hard error (never silent truncation —
 /// full replication means every committed chunk is present).
-fn read_range(store: &Store, file: &FileObj, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+fn read_range(store: &Store, file: &FileObj, offset: u64, len: u64) -> Result<Vec<u8>, FsRefusal> {
     let size = file.size;
     if offset >= size || len == 0 {
         return Ok(Vec::new());
@@ -938,15 +981,14 @@ fn read_range(store: &Store, file: &FileObj, offset: u64, len: u64) -> Result<Ve
     let last = ((end - 1) / CHUNK_SIZE) as usize;
     let mut out = Vec::with_capacity((end - offset) as usize);
     for index in first..=last {
-        let chunk_id = file
-            .chunks
-            .get(index)
-            .ok_or_else(|| "file references fewer chunks than its size implies".to_string())?;
-        let (kind, body) = store
-            .get(chunk_id)?
-            .ok_or_else(|| format!("chunk object missing: {}", to_hex(chunk_id)))?;
+        let chunk_id = file.chunks.get(index).ok_or_else(|| {
+            FsRefusal::Corrupt("file references fewer chunks than its size implies".into())
+        })?;
+        let (kind, body) = store.get(chunk_id)?.ok_or_else(|| {
+            FsRefusal::Corrupt(format!("chunk object missing: {}", to_hex(chunk_id)))
+        })?;
         if kind != Kind::Chunk {
-            return Err("expected a chunk object".into());
+            return Err(FsRefusal::Corrupt("expected a chunk object".into()));
         }
         // fix 2b (silent-corruption defense): content-addressing pins a chunk's
         // BYTES but not its LENGTH-in-context, so a peer-synced FileObj could name
@@ -954,8 +996,9 @@ fn read_range(store: &Store, file: &FileObj, offset: u64, len: u64) -> Result<Ve
         // here, in hand of the bytes: an interior chunk must be exactly CHUNK_SIZE
         // and the last exactly `size - (n-1)*CHUNK_SIZE`, so a misaligned read is
         // an Err, never silently-wrong bytes.
-        verify_chunk_len(file, index, body.len() as u64)
-            .map_err(|_| format!("chunk length inconsistent: {}", to_hex(chunk_id)))?;
+        verify_chunk_len(file, index, body.len() as u64).map_err(|_| {
+            FsRefusal::Corrupt(format!("chunk length inconsistent: {}", to_hex(chunk_id)))
+        })?;
         // intersect the requested range with this chunk's byte span and copy it.
         let chunk_start = index as u64 * CHUNK_SIZE;
         let chunk_end = chunk_start + body.len() as u64;
@@ -1018,12 +1061,13 @@ mod subtree_after_tests {
 }
 
 #[cfg(test)]
-mod stat_root_tests {
+mod query_tests {
     use std::collections::BTreeMap;
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
+    use crate::FsRefusal;
     use crate::fs::Fs;
     use crate::state::Refs;
     use crate::store::{MemStore, ObjectStore};
@@ -1140,5 +1184,45 @@ mod stat_root_tests {
         assert_eq!(file.size, 5);
 
         assert!(stat_of(&fs, "/shared/missing").is_none(), "absent is None");
+    }
+
+    fn ls_refusal(fs: &Fs<MemStore>, path: &str) -> FsRefusal {
+        fs.query(FilesQuery::Ls {
+            path: path.into(),
+            snapshot: None,
+            after: None,
+            limit: 10,
+        })
+        .expect_err("this listing must refuse")
+    }
+
+    /// the refusal a caller branches on, driven through the real query path: an
+    /// absent path is `not_found` and the SENTENCE, not the class, names which
+    /// path — which is what lets the class be shared with every other absence.
+    #[test]
+    fn listing_an_absent_path_refuses_path_not_found() {
+        let err = ls_refusal(&populated(), "/shared/nope");
+        assert_eq!(
+            err,
+            FsRefusal::PathNotFound {
+                path: "/shared/nope".into()
+            }
+        );
+        assert_eq!(err.class(), refusal_class::NOT_FOUND, "{err}");
+    }
+
+    /// a file listed as a directory is the caller's mistake and no amount of
+    /// waiting or re-reading fixes it, so it is `invalid_input` and NOT the
+    /// `not_found` the absent path above gets.
+    #[test]
+    fn listing_a_file_refuses_not_a_directory() {
+        let err = ls_refusal(&populated(), "/shared/f");
+        assert_eq!(
+            err,
+            FsRefusal::NotADirectory {
+                path: "/shared/f".into()
+            }
+        );
+        assert_eq!(err.class(), refusal_class::INVALID_INPUT, "{err}");
     }
 }

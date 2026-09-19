@@ -7,6 +7,7 @@ version.workspace = true
 # pure Fs<S>, queries, GC, and memory stores. No sdk and no disk persistence.
 
 [dependencies]
+refusal-class = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

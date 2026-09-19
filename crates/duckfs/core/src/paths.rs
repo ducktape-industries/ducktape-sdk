@@ -7,6 +7,11 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::wire::{MAX_DEPTH, MAX_NAME_BYTES, MAX_PATH_BYTES};
 
+/// the absolute path canonical segments came from — what a refusal names.
+pub(crate) fn join_segs(segs: &[String]) -> String {
+    format!("/{}", segs.join("/"))
+}
+
 /// validate a consensus path and split it into its segments. paths are strict
 /// consensus data: utf-8 (given by `&str`), NFC-normalized, absolute,
 /// `/`-separated, with no empty / `.` / `..` segments and no NUL bytes. this

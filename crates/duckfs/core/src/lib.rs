@@ -16,6 +16,7 @@ pub mod gc;
 pub mod objects;
 pub mod paths;
 pub mod queries;
+mod refusal;
 mod retention;
 pub mod state;
 pub mod store;
@@ -26,6 +27,7 @@ pub mod testkit;
 
 pub use fs::{Fs, Notification, StagedObjects};
 pub use objects::{Kind, ObjectId};
+pub use refusal::{FsRefusal, STORAGE};
 pub use state::{
     PinEntry, Refs, Staged, decode_block_objects, decode_refs, encode_block_objects, encode_refs,
     root_bytes,
